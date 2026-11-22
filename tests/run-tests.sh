@@ -46,11 +46,18 @@ if command -v sh >/dev/null 2>&1; then
     done
 fi
 if command -v pwsh >/dev/null 2>&1; then
-    pwsh -NoLogo -NoProfile -Command '
-      $e=$null
-      [System.Management.Automation.Language.Parser]::ParseFile(
-        "'$ROOT'/completer.ps1",[ref]$null,[ref]$e)|Out-Null
-      if($e){exit 1}else{exit 0}' && pass "pwsh parse completer.ps1" || fail "pwsh parse completer.ps1"
+    # Git Bash paths (/d/a/...) are meaningless to PowerShell; convert when possible.
+    if command -v cygpath >/dev/null 2>&1; then
+        PWSH_ROOT=$(cygpath -w "$ROOT")
+    else
+        PWSH_ROOT="$ROOT"
+    fi
+    COMPLETER_TEST_ROOT="$PWSH_ROOT" pwsh -NoLogo -NoProfile -Command '
+      $e = $null
+      $f = Join-Path $env:COMPLETER_TEST_ROOT "completer.ps1"
+      [System.Management.Automation.Language.Parser]::ParseFile($f,[ref]$null,[ref]$e) | Out-Null
+      if ($e) { exit 1 } else { exit 0 }' \
+      && pass "pwsh parse completer.ps1" || fail "pwsh parse completer.ps1"
 fi
 if command -v nu >/dev/null 2>&1; then
     XDG_CONFIG_HOME="$ROOT/.nu-test-config" nu --no-config-file -c \
