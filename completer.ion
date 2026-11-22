@@ -1,0 +1,292 @@
+# ============================================================================
+# completer.ion - Ion-native modular completion manager (MAXIMUM FEASIBLE SUBSET).
+#
+# ZERO STARTUP WORK: sourcing this file only DEFINES functions (fn ... end).
+# No probing, no config writes, and no completion registration happen at load.
+#
+# Native APIs used (confirmed from the official Ion manual):
+#   fn name arg... / end                 (functions; every block closes with end)
+#   let x = value                        (variables); ${env::NAME} (env namespace)
+#   $(cmd args...)                       (string process expansion -> capture)
+#   @(cmd...) / @var / @split()          (array expansions / explode / split method)
+#   if test ... / else if test ... / else / end
+#   for x in @arr ... end ; continue
+#   alias name = "value"                 (aliases; add only)
+#   ^> /dev/null                          (stderr redirect in Ion)
+#   source FILEPATH                       (source generated files)
+#
+# Official docs:
+#   https://doc.redox-os.org/ion-manual/functions.html
+#   https://doc.redox-os.org/ion-manual/expansions/02-process.html
+#   https://doc.redox-os.org/ion-manual/expansions/01-variable.html#aliases
+#   https://doc.redox-os.org/ion-manual/builtins.html
+#   https://doc.redox-os.org/ion-manual/general.html#xdg-app-dirs-support
+#   https://carapace-sh.github.io/carapace-bin/setup.html   (no Ion section)
+#   https://github.com/ajeetdsouza/zoxide                   (no Ion init; Ion is non-POSIX)
+#
+# GAPs vs the universal surface (documented, NOT worked around with invented APIs):
+#   - NO native programmable completion API exists in Ion (no complete/compgen and
+#     no completion chapter/builtin in the official manual). Dynamic self-completion
+#     for `completer` is therefore IMPOSSIBLE; `completer self` prints this limitation
+#     and is a documented no-op. No API is invented.
+#   - Alias REMOVAL: no `unalias` builtin is documented. `alias add` works natively;
+#     `alias remove` only edits the managed alias file and reports that live removal
+#     is unavailable (does not call a non-existent API).
+#   - Carapace: no bridge exists for Ion; only the native CLI (--clear-cache,
+#     --list, _carapace <shell>) is run into files for OTHER target shells.
+#   - Zoxide: no `zoxide init ion` exists and Ion is non-POSIX; skipped with notice.
+#   - Function parameters: the manual documents named positional parameters but no
+#     variadic rest form; `completer <shell> <p1> <p2> <p3>` is accepted (3 slots),
+#     with multi-program batches beyond that passed as a space-separated 1st slot
+#     (split via the documented @split method). This is the maximum feasible subset.
+# ============================================================================
+
+fn _completer_root
+    if test -n "${env::COMPLETER_ROOT}"
+        let result = ${env::COMPLETER_ROOT}
+    else if test -n "${env::XDG_CONFIG_HOME}"
+        let result = ${env::XDG_CONFIG_HOME}/completer
+    else
+        let result = ~/.config/completer
+    end
+    echo $result
+end
+
+fn _completer_token shell
+    if test "$shell" = nu -o "$shell" = nushell
+        echo nushell
+    else if test "$shell" = pwsh -o "$shell" = powershell
+        echo powershell
+    else
+        echo $shell
+    end
+end
+
+fn _completer_ext shell
+    if test "$shell" = nu
+        echo nu
+    else if test "$shell" = xonsh
+        echo xsh
+    else if test "$shell" = pwsh
+        echo ps1
+    else
+        echo $shell
+    end
+end
+
+fn _completer_backup file
+    if test -f $file
+        let stamp = $(date +%Y%m%d-%H%M%S)
+        let dst = $file.bak.$stamp
+        cp $file $dst
+        echo "  backup -> $dst"
+    end
+end
+
+fn _completer_main_config shell
+    let cfg = ~/.config
+    if test -n "${env::XDG_CONFIG_HOME}"
+        let cfg = ${env::XDG_CONFIG_HOME}
+    end
+    if test "$shell" = bash
+        echo ~/.bashrc
+    else if test "$shell" = zsh
+        echo ~/.zshrc
+    else if test "$shell" = sh
+        echo ~/.profile
+    else if test "$shell" = fish
+        echo $cfg/fish/config.fish
+    else if test "$shell" = pwsh -o "$shell" = powershell
+        echo ~/Documents/PowerShell/profile.ps1
+    else if test "$shell" = nu
+        echo $cfg/nushell/config.nu
+    else if test "$shell" = xonsh
+        echo $cfg/xonsh/.xonshrc
+    else if test "$shell" = elvish
+        echo $cfg/elvish/rc.elv
+    else if test "$shell" = tcsh
+        echo ~/.tcshrc
+    else if test "$shell" = ksh
+        echo ~/.kshrc
+    else if test "$shell" = ion
+        echo ~/.config/ion/initrc
+    else if test "$shell" = oil
+        echo ~/.config/oils/oshrc
+    else if test "$shell" = yash
+        echo $cfg/yash/rc
+    else
+        echo $cfg/completer/$shell-completion.$(_completer_ext $shell)
+    end
+end
+
+fn _completer_link config file shell
+    if test -f $config
+        let base = $basename($file)
+        let marker = "# >>> completer:$shell:$base >>>"
+        grep -qF $marker $config
+        if test $status -ne 0
+            let load = ". '$file'"
+            if test "$shell" = nu -o "$shell" = fish
+                let load = "source '$file'"
+            else if test "$shell" = xonsh
+                let load = "execx(open('$file').read(), 'exec', __xonsh__.ctx)"
+            else if test "$shell" = elvish
+                let load = "eval (slurp < '$file')"
+            end
+            echo "" >> $config
+            echo $marker >> $config
+            echo $load >> $config
+            echo "# <<< completer:$shell:$base <<<" >> $config
+            echo "  linked -> $config"
+        end
+    end
+end
+
+fn _completer_program_output prog shell tok
+    let a1 = "completion --shell $tok"
+    let a2 = "completion -s $tok"
+    let a3 = "completion $tok"
+    let a4 = "completions $tok"
+    let a5 = "--generate-completion $tok"
+    let a6 = "--completions $tok"
+    for a in [ $a1 $a2 $a3 $a4 $a5 $a6 ]
+        let words = [ @split($a) ]
+        let text = $($prog @words ^>/dev/null)
+        if test -n "$text"
+            echo $text
+            return
+        end
+    end
+    let via = $(carapace $prog $tok ^>/dev/null)
+    echo $via
+end
+
+fn _completer_update_carapace
+    let has = $(which carapace ^>/dev/null)
+    if test -z "$has"
+        echo 'carapace not found; nothing to update'
+        return
+    end
+    echo 'Refreshing carapace indexes (native carapace CLI)...'
+    let dir = $(_completer_root)/completions
+    mkdir -p $dir
+    carapace --clear-cache ^>/dev/null
+    let listed = $(carapace --list ^>/dev/null)
+    echo '  carapace index queried'
+    for sh in [ bash zsh fish powershell nushell xonsh ]
+        let out = $dir/carapace-$sh-init.$(_completer_ext $sh)
+        let text = $(carapace _carapace $sh ^>/dev/null)
+        if test -n "$text"
+            _completer_backup $out
+            echo $text > $out
+            echo "  indexed: $sh -> $out"
+        end
+    end
+    echo 'Carapace index refreshed (no Ion bridge is documented).'
+end
+
+fn _completer_zoxide shell
+    let has = $(which zoxide ^>/dev/null)
+    if test -z "$has"
+        echo 'zoxide not found; nothing to do'
+        return
+    end
+    echo 'zoxide: no native `zoxide init ion` exists and Ion is non-POSIX; skipped.'
+end
+
+fn _completer_alias_add name value
+    alias $name = "$value"
+    let root = $(_completer_root)
+    mkdir -p $root
+    let file = $root/alias.ion
+    if test -f $file
+        let tmp = $file.tmp
+        grep -vF "alias $name" $file > $tmp
+        mv $tmp $file
+    end
+    echo "alias $name = \"$value\"" >> $file
+    echo "  alias $name -> $value"
+end
+
+fn _completer_alias_remove name
+    # GAP: Ion documents no `unalias` builtin; only remove from managed file.
+    let file = $(_completer_root)/alias.ion
+    if test -f $file
+        let tmp = $file.tmp
+        grep -vF "alias $name" $file > $tmp
+        mv $tmp $file
+    end
+    echo "  alias $name removed from managed file (live removal unavailable: no unalias API)"
+end
+
+fn _completer_self
+    # GAP: no completion API in Ion -> self-completion impossible; explicit no-op.
+    echo 'Self-completion NOT feasible in Ion: official docs document no completion API.'
+end
+
+fn completer action a b c
+    let root = $(_completer_root)
+    let dir = $root/completions
+    mkdir -p $dir
+
+    if test "$action" = list
+        ls -l $dir
+        return
+    else if test "$action" = self
+        _completer_self
+        return
+    else if test "$action" = zoxide
+        if test -z "$a"
+            _completer_zoxide ion
+        else
+            for z in @split($a)
+                _completer_zoxide $z
+            end
+        end
+        return
+    else if test "$action" = update
+        if test "$a" = carapace
+            _completer_update_carapace
+        else
+            echo 'Unknown update target. Try: completer update carapace'
+        end
+        return
+    else if test "$action" = alias
+        if test "$a" = add
+            _completer_alias_add $b $c
+        else if test "$a" = remove
+            _completer_alias_remove $b
+        else
+            echo 'usage: completer alias add <name> <value> | remove <name>'
+        end
+        return
+    end
+
+    let shell = $action
+    let tok = $(_completer_token $shell)
+    let ext = $(_completer_ext $shell)
+    let progs = [ $a $b $c ]
+    if test -z "$a"
+        let progs = [ opencode ]
+    end
+    for prog in @progs
+        if test -z "$prog"
+            continue
+        end
+        echo "Generating $prog completions for $shell..."
+        let out = $dir/$shell-$prog-completion.$ext
+        let text = $(_completer_program_output $prog $shell $tok)
+        if test -z "$text"
+            echo "  no completion for $prog ($shell)"
+            continue
+        end
+        _completer_backup $out
+        let stamp = $(date -u +%Y-%m-%dT%H:%M:%SZ)
+        echo "# >>> completer:$prog:$shell generated $stamp >>>" >> $out
+        echo $text >> $out
+        echo "# <<< completer:$prog:$shell <<<" >> $out
+        echo "  wrote -> $out"
+        _completer_link $(_completer_main_config $shell) $out $shell
+    end
+    _completer_self
+end

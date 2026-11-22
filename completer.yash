@@ -1,0 +1,229 @@
+# ============================================================================
+# completer.yash - Yash (2.61) native modular completion manager.
+#
+# ZERO STARTUP WORK: sourcing this file only DEFINES functions. The
+# `completion//argument` self-completion hook is DEFINED by `completer self`
+# (or first generation), never at load time. No probing at load.
+#
+# Native APIs used (official docs below; only POSIX constructs + Yash-builtins):
+#   name() { ... } / alias NAME=VALUE / unalias / . (dot) / command -v / set --
+#   complete [-...] word...            (builtin generating completion candidates)
+#   completion//argument function      (generic per-argument completion hook)
+#     locals: WORDS (command + prior args), TARGETWORD (word being completed)
+#     fallback: `complete -f` emits file candidates for non-completer commands
+#   zoxide generic: `zoxide init posix --hook prompt` (no yash init exists)
+#
+# Official docs:
+#   https://magicant.github.io/yash/doc/
+#   https://magicant.github.io/yash/doc/lineedit.html#completion-detail
+#   https://magicant.github.io/yash/doc/_complete.html
+#   https://magicant.github.io/yash/doc/_alias.html
+#   https://github.com/magicant/yash
+#   https://carapace-sh.github.io/carapace-bin/setup.html   (no Yash section)
+#   https://github.com/ajeetdsouza/zoxide#setup-zoxide-on-your-shell
+#
+# GAPs vs the universal surface:
+#   - No per-command completion registration builtin. Self-completion is achieved
+#     via the generic `completion//argument` hook branching on $WORDS[1] = completer
+#     (feasible per docs, but no verbatim example is published -> derived).
+#   - No carapace bridge for Yash; only the native CLI is run into files.
+#   - No `zoxide init yash`; generic POSIX init is used.
+#   - Verbatim `unalias` syntax/dot -AL flags were not fetched; standard POSIX
+#     forms are used. No Windows rc path is documented.
+# ============================================================================
+
+_completer_root() {
+    if [ -n "$COMPLETER_ROOT" ]; then printf '%s' "$COMPLETER_ROOT"; return; fi
+    printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/completer"
+}
+
+_completer_token() {
+    case "$1" in
+        nu|nushell) printf 'nushell' ;;
+        pwsh|powershell) printf 'powershell' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+_completer_ext() {
+    case "$1" in
+        nu) printf 'nu' ;; xonsh) printf 'xsh' ;; pwsh) printf 'ps1' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+_completer_capture() {
+    _cc_out=$("$@" 2>/dev/null) || return 1
+    case "$_cc_out" in DESCRIPTION*|USAGE*|'') return 1 ;; esac
+    printf '%s' "$_cc_out"
+}
+
+_completer_program_output() {
+    _cpo_prog=$1 _cpo_shell=$2 _cpo_tok=$3
+    for _cpo_a in "completion --shell $_cpo_tok" "completion -s $_cpo_tok" "completion $_cpo_tok" \
+                  "completions $_cpo_tok" "--generate-completion $_cpo_tok" "--completions $_cpo_tok"; do
+        command -v "$_cpo_prog" >/dev/null 2>&1 || continue
+        _cpo_text=$(_completer_capture "$_cpo_prog" $_cpo_a) || continue
+        printf '%s' "$_cpo_text"; return 0
+    done
+    if command -v carapace >/dev/null 2>&1; then
+        _cpo_text=$(_completer_capture carapace "$_cpo_prog" "$_cpo_tok") || return 1
+        printf '%s' "$_cpo_text"; return 0
+    fi
+    return 1
+}
+
+_completer_backup() {
+    [ -f "$1" ] || return 0
+    _cb_stamp=$(date +%Y%m%d-%H%M%S)
+    cp -- "$1" "$1.bak.$_cb_stamp" && printf '  backup -> %s.bak.%s\n' "$1" "$_cb_stamp"
+}
+
+_completer_main_config() {
+    case "$1" in
+        sh) printf '%s' "$HOME/.profile" ;;
+        bash) printf '%s' "$HOME/.bashrc" ;;
+        zsh) printf '%s' "$HOME/.zshrc" ;;
+        yash) printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/yash/rc" ;;
+        fish) printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish" ;;
+        pwsh|powershell) printf '%s' "${HOME}/Documents/PowerShell/profile.ps1" ;;
+        nu) printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/nushell/config.nu" ;;
+        xonsh) printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/xonsh/.xonshrc" ;;
+        *) printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/completer/$1-completion.$(_completer_ext "$1")" ;;
+    esac
+}
+
+_completer_link() {
+    _cl_config=$1 _cl_file=$2 _cl_shell=$3
+    [ -f "$_cl_config" ] || return 0
+    _cl_base=${_cl_file##*/}
+    _cl_marker="# >>> completer:$_cl_shell:$_cl_base >>>"
+    grep -qF -- "$_cl_marker" "$_cl_config" && return 0
+    case "$_cl_shell" in
+        nu|fish) _cl_load="source '$_cl_file'" ;;
+        xonsh) _cl_load="execx(open('$_cl_file').read(), 'exec', __xonsh__.ctx)" ;;
+        *) _cl_load=". '$_cl_file'" ;;
+    esac
+    printf '\n%s\n%s\n# <<< completer:%s:%s <<<\n' \
+        "$_cl_marker" "$_cl_load" "$_cl_shell" "$_cl_base" >> "$_cl_config"
+    printf '  linked -> %s\n' "$_cl_config"
+}
+
+_add_alias() {
+    _ca_name=$1; shift; _ca_value="$*"
+    _ca_file="$(_completer_root)/alias.yash"
+    mkdir -p "$(dirname "$_ca_file")"
+    [ -f "$_ca_file" ] || printf '# alias.yash - managed by completer\n' > "$_ca_file"
+    grep -vE "^[[:space:]]*alias[[:space:]]+$_ca_name=" "$_ca_file" > "$_ca_file.tmp" && mv "$_ca_file.tmp" "$_ca_file"
+    printf "alias %s='%s'\n" "$_ca_name" "$_ca_value" >> "$_ca_file"
+    alias "$_ca_name=$_ca_value"
+    printf '  alias %s -> %s in %s\n' "$_ca_name" "$_ca_value" "$_ca_file"
+}
+
+_remove_alias() {
+    _cr_name=$1
+    _cr_file="$(_completer_root)/alias.yash"
+    [ -f "$_cr_file" ] || return 0
+    grep -vE "^[[:space:]]*alias[[:space:]]+$_cr_name=" "$_cr_file" > "$_cr_file.tmp" && mv "$_cr_file.tmp" "$_cr_file"
+    unalias "$_cr_name" 2>/dev/null || true
+    printf '  alias %s removed\n' "$_cr_name"
+}
+
+# Self-completion installed on demand (definition only, never at load).
+_completer_register_self() {
+completion//argument() {
+    if [ "$WORDS[1]" = completer ]; then
+        case "$TARGETWORD" in
+            a*) complete add alias ;;
+            r*) complete remove ;;
+            l*) complete list ;;
+            u*) complete update ;;
+            z*) complete zoxide ;;
+            s*) complete self ;;
+            *)  complete add remove list update zoxide self ;;
+        esac
+    else
+        complete -f
+    fi
+}
+    printf 'Self-completion registered via yash completion//argument hook.\n'
+}
+
+_completer_update_carapace() {
+    if ! command -v carapace >/dev/null 2>&1; then
+        printf 'carapace not found; nothing to update\n'; return 0
+    fi
+    printf 'Refreshing carapace indexes (native carapace CLI)...\n'
+    _cuc_dir="$(_completer_root)/completions"
+    mkdir -p "$_cuc_dir"
+    carapace --clear-cache >/dev/null 2>&1 || true
+    _cuc_n=$(carapace --list 2>/dev/null | wc -l)
+    printf '  indexed completers: %s\n' "$_cuc_n"
+    for _cuc_sh in bash zsh fish powershell nushell xonsh; do
+        _cuc_out="$_cuc_dir/carapace-$_cuc_sh-init.$(_completer_ext "$_cuc_sh")"
+        _cuc_res=$(carapace _carapace "$_cuc_sh" 2>/dev/null) || continue
+        [ -n "$_cuc_res" ] || continue
+        _completer_backup "$_cuc_out"
+        printf '%s\n' "$_cuc_res" > "$_cuc_out"
+        printf '  indexed: %s -> %s\n' "$_cuc_sh" "$_cuc_out"
+    done
+    printf 'Carapace index refreshed (no Yash bridge is documented).\n'
+}
+
+_completer_zoxide() {
+    command -v zoxide >/dev/null 2>&1 || { printf 'zoxide not found; nothing to do\n'; return 0; }
+    _cz_shell=$1
+    _cz_tok=$(_completer_token "$_cz_shell")
+    case "$_cz_shell" in
+        yash|sh) _cz_tok=posix ;;
+    esac
+    _cz_text=$(zoxide init "$_cz_tok" --hook prompt 2>/dev/null) || return 1
+    [ -n "$_cz_text" ] || { printf 'no zoxide init for %s\n' "$_cz_shell"; return 1; }
+    _cz_out="$(_completer_root)/completions/$_cz_shell-zoxide-init.$(_completer_ext "$_cz_shell")"
+    _completer_backup "$_cz_out"
+    printf '%s\n' "$_cz_text" > "$_cz_out"
+    printf '  wrote zoxide init -> %s\n' "$_cz_out"
+    _completer_link "$(_completer_main_config "$_cz_shell")" "$_cz_out" "$_cz_shell"
+}
+
+completer() {
+    _c_action=$1; shift
+    if [ $# -eq 0 ]; then set -- opencode; fi
+    _c_root=$(_completer_root); _c_dir="$_c_root/completions"
+    mkdir -p "$_c_dir"
+
+    case "$_c_action" in
+        list) ls -l "$_c_dir"; return 0 ;;
+        self) _completer_register_self; return 0 ;;
+        zoxide)
+            if [ "$1" = opencode ]; then set -- pwsh nu xonsh; fi
+            for _c_z in "$@"; do _completer_zoxide "$_c_z"; done
+            return 0 ;;
+        update)
+            if [ "$1" = carapace ]; then _completer_update_carapace
+            else printf 'Unknown update target. Try: completer update carapace\n'; fi
+            return 0 ;;
+        alias)
+            case "$1" in
+                add) _add_alias "$2" "${3} ${4} ${5}" ;;
+                remove) _remove_alias "$2" ;;
+                *) printf 'usage: completer alias add <name> <value> | remove <name>\n' ;;
+            esac
+            return 0 ;;
+    esac
+
+    _c_shell=$_c_action
+    _c_tok=$(_completer_token "$_c_shell"); _c_ext=$(_completer_ext "$_c_shell")
+    for _c_prog in "$@"; do
+        printf 'Generating %s completions for %s...\n' "$_c_prog" "$_c_shell"
+        _c_out="$_c_dir/$_c_shell-$_c_prog-completion.$_c_ext"
+        _c_text=$(_completer_program_output "$_c_prog" "$_c_shell" "$_c_tok") || { printf '  no completion for %s (%s)\n' "$_c_prog" "$_c_shell"; continue; }
+        _completer_backup "$_c_out"
+        { printf '\n# >>> completer:%s:%s generated %s >>>\n' "$_c_prog" "$_c_shell" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          printf '%s\n' "$_c_text"
+          printf '\n# <<< completer:%s:%s <<<\n' "$_c_prog" "$_c_shell"; } >> "$_c_out"
+        printf '  wrote -> %s\n' "$_c_out"
+        _completer_link "$(_completer_main_config "$_c_shell")" "$_c_out" "$_c_shell"
+    done
+    _completer_register_self
+}
