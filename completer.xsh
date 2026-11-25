@@ -58,6 +58,15 @@ def _ext(shell):
     }.get(shell.lower(), shell.lower())
 
 
+_BAD_NAME_CHARS = frozenset("/\\ ;|&$`<>()\n\r")
+
+
+def _valid_name(name):
+    """Reject names that could traverse the completions dir or inject code."""
+    s = str(name)
+    return bool(s) and ".." not in s and not (_BAD_NAME_CHARS & set(s))
+
+
 def _main_config(shell):
     """Primary config file of the target shell where link blocks are appended."""
     cfg = __xonsh__.env.get("XDG_CONFIG_HOME") or str(_P.home() / ".config")
@@ -80,10 +89,10 @@ def _main_config(shell):
 
 
 def _backup(path):
-    """Copy an existing target to <path>.bak.<timestamp> before any change."""
+    """Keep ONE fixed <path>.bak per target (overwrite) before any change."""
     p = _P(path)
     if p.exists():
-        dest = str(p) + ".bak." + _dt.now().strftime("%Y%m%d-%H%M%S")
+        dest = str(p) + ".bak"
         _cs.copy2(str(p), dest)
         print("  backup -> " + dest)
 
@@ -139,13 +148,14 @@ def _native_spec(shell):
 
 def _program_output(program, shell, token):
     """Acquire a completion script using the SPEC's ordered strategy."""
-    for probe in ([program, "completion", "--shell", token],
-                  [program, "completion", "-s", token],
-                  [program, "completion", token],
-                  [program, "completions", token],
-                  [program, "--generate-completion", token],
-                  [program, "--completions", token]):
-        if _which(probe[0]):
+    # Resolve the program once; the first successful probe returns immediately.
+    if _which(program):
+        for probe in ([program, "completion", "--shell", token],
+                      [program, "completion", "-s", token],
+                      [program, "completion", token],
+                      [program, "completions", token],
+                      [program, "--generate-completion", token],
+                      [program, "--completions", token]):
             out = _capture(probe[0], probe[1:])
             if out:
                 return out
@@ -161,6 +171,9 @@ def _program_output(program, shell, token):
 # ------------------------------------------------------------- alias management
 def add_alias(name, value):
     """Add/replace an alias in alias.xsh and in the LIVE aliases mapping."""
+    if not _valid_name(name):
+        print("invalid alias name: %s" % name)
+        return
     f = _P(_root()) / "alias.xsh"
     f.parent.mkdir(parents=True, exist_ok=True)
     if not f.exists():
@@ -177,6 +190,9 @@ def add_alias(name, value):
 
 def remove_alias(name):
     """Remove an alias from alias.xsh and from the LIVE aliases mapping."""
+    if not _valid_name(name):
+        print("invalid alias name: %s" % name)
+        return
     f = _P(_root()) / "alias.xsh"
     if f.exists():
         _backup(str(f))
@@ -212,6 +228,9 @@ def completer_zoxide(shell):
     """Generate and link zoxide's native init script for a shell."""
     if not _which("zoxide"):
         print("zoxide not found; nothing to do")
+        return
+    if not _valid_name(shell):
+        print("invalid shell name: %s" % shell)
         return
     token = _token(shell)
     try:
@@ -288,9 +307,15 @@ def completer(action=None, *programs):
         return
 
     shell = action
+    if not _valid_name(shell):
+        print("invalid shell name: " + shell)
+        return
     token = _token(shell)
     ext = _ext(shell)
     for prog in progs:
+        if not _valid_name(prog):
+            print("  invalid program name: %s (skipped)" % prog)
+            continue
         print("Generating %s completions for %s..." % (prog, shell))
         out = str(d / ("%s-%s-completion.%s" % (shell, prog, ext)))
         text = _program_output(prog, shell, token)

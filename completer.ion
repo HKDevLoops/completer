@@ -11,6 +11,7 @@
 #   @(cmd...) / @var / @split()          (array expansions / explode / split method)
 #   if test ... / else if test ... / else / end
 #   for x in @arr ... end ; continue
+#   contains <PATTERN> tests...          (builtin substring test)
 #   alias name = "value"                 (aliases; add only)
 #   ^> /dev/null                          (stderr redirect in Ion)
 #   source FILEPATH                       (source generated files)
@@ -63,24 +64,67 @@ fn _completer_token shell
 end
 
 fn _completer_ext shell
-    if test "$shell" = nu
+    if test "$shell" = nu -o "$shell" = nushell
         echo nu
     else if test "$shell" = xonsh
         echo xsh
-    else if test "$shell" = pwsh
+    else if test "$shell" = pwsh -o "$shell" = powershell
         echo ps1
     else
         echo $shell
     end
 end
 
+# Echo 1 when the name is safe, 0 otherwise. Whitelist of safe code points plus
+# an explicit '..' check; a newline in the name yields more than one printf line.
+fn _completer_valid_name name
+    if test -z "$name"
+        echo 0
+    else
+        let lines = $(printf '%s\n' "$name" | wc -l)
+        if test $lines -ne 1
+            echo 0
+        else
+            printf '%s' "$name" | grep -qEv '^[A-Za-z0-9_.-]+$'
+            if test $status -eq 0
+                echo 0
+            else
+                if contains "$name" '..'
+                    echo 0
+                else
+                    echo 1
+                end
+            end
+        end
+    end
+end
+
 fn _completer_backup file
     if test -f $file
-        let stamp = $(date +%Y%m%d-%H%M%S)
-        let dst = $file.bak.$stamp
+        let dst = $file.bak
         cp $file $dst
         echo "  backup -> $dst"
     end
+end
+
+# Idempotent generated block: rewrite in place (one block) when the begin marker
+# exists, otherwise append. Callers back up the target before invoking this.
+fn _completer_write_block out prog shell text
+    let begin = "# >>> completer:$prog:$shell"
+    if test -f $out
+        grep -qF $begin $out
+        if test $status -eq 0
+            echo "" > $out
+        else
+            echo "" >> $out
+        end
+    else
+        echo "" >> $out
+    end
+    let stamp = $(date -u +%Y-%m-%dT%H:%M:%SZ)
+    echo "# >>> completer:$prog:$shell generated $stamp >>>" >> $out
+    echo "$text" >> $out
+    echo "# <<< completer:$prog:$shell <<<" >> $out
 end
 
 fn _completer_main_config shell
@@ -195,6 +239,10 @@ fn _completer_zoxide shell
 end
 
 fn _completer_alias_add name value
+    if test $(_completer_valid_name $name) -eq 0
+        echo "invalid alias name: $name"
+        return
+    end
     alias $name = "$value"
     let root = $(_completer_root)
     mkdir -p $root
@@ -209,6 +257,10 @@ fn _completer_alias_add name value
 end
 
 fn _completer_alias_remove name
+    if test $(_completer_valid_name $name) -eq 0
+        echo "invalid alias name: $name"
+        return
+    end
     # GAP: Ion documents no `unalias` builtin; only remove from managed file.
     let file = $(_completer_root)/alias.ion
     if test -f $file
@@ -263,6 +315,10 @@ fn completer action a b c
     end
 
     let shell = $action
+    if test $(_completer_valid_name $shell) -eq 0
+        echo "invalid shell name: $shell"
+        return
+    end
     let tok = $(_completer_token $shell)
     let ext = $(_completer_ext $shell)
     let progs = [ $a $b $c ]
@@ -273,6 +329,10 @@ fn completer action a b c
         if test -z "$prog"
             continue
         end
+        if test $(_completer_valid_name $prog) -eq 0
+            echo "invalid program name: $prog"
+            continue
+        end
         echo "Generating $prog completions for $shell..."
         let out = $dir/$shell-$prog-completion.$ext
         let text = $(_completer_program_output $prog $shell $tok)
@@ -281,10 +341,7 @@ fn completer action a b c
             continue
         end
         _completer_backup $out
-        let stamp = $(date -u +%Y-%m-%dT%H:%M:%SZ)
-        echo "# >>> completer:$prog:$shell generated $stamp >>>" >> $out
-        echo $text >> $out
-        echo "# <<< completer:$prog:$shell <<<" >> $out
+        _completer_write_block $out $prog $shell $text
         echo "  wrote -> $out"
         _completer_link $(_completer_main_config $shell) $out $shell
     end

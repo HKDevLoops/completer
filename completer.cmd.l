@@ -62,6 +62,20 @@ function M.ext(shell)
     return shell
 end
 
+-- SECURITY: a shell/program/alias name must be a bare token. This rejects
+-- cmd.exe metacharacters (& | ^ < > ( ) " % !), whitespace/newlines, path
+-- separators (/ and \) and '..' traversal before any name reaches a shell
+-- parser, a generated filename, or a block sourced on the next launch.
+function M.safe_name(s)
+    return type(s) == "string" and s ~= "" and s:match("^[%w_%-]+$") ~= nil
+end
+
+-- SECURITY: doskey macro values are appended verbatim to a cmd.exe command
+-- line, so reject the metacharacters that could break out of the macro.
+function M.cmd_unsafe(s)
+    return type(s) ~= "string" or s:match('[&|^<>()"%%!\r\n]') ~= nil
+end
+
 function M.main_config(shell)
     local cfg = os.getenv("XDG_CONFIG_HOME")
     if not cfg or cfg == "" then cfg = (os.getenv("USERPROFILE") or ".") .. "/.config" end
@@ -79,7 +93,8 @@ function M.main_config(shell)
     return map[shell] or (M.root() .. "/completions/" .. shell .. "-completion." .. M.ext(shell))
 end
 
--- Run cmd, return stdout as a string, or nil on failure.
+-- Run cmd, return stdout as a string, or nil on failure. Callers pass only
+-- fixed command text plus names already checked by M.safe_name().
 function M.capture(cmd)
     local h = io.popen(cmd .. " 2>NUL")
     if not h then return nil end
@@ -91,6 +106,7 @@ function M.capture(cmd)
 end
 
 function M.exists(cmd)
+    if not M.safe_name(cmd) then return false end
     return M.capture("where " .. cmd) ~= nil
 end
 
@@ -142,6 +158,8 @@ function M.link(config, file, shell)
 end
 
 function M.program_output(prog, tok)
+    -- Validate before concatenating anything into a cmd.exe command string.
+    if not M.safe_name(prog) or not M.safe_name(tok) then return nil end
     local probes = {
         "completion --shell " .. tok, "completion -s " .. tok, "completion " .. tok,
         "completions " .. tok, "--generate-completion " .. tok, "--completions " .. tok,
@@ -188,7 +206,9 @@ function M.zoxide(shells)
     local dir = M.root() .. "/completions"
     os.execute('mkdir "' .. dir .. '" >NUL 2>&1')
     for _, shell in ipairs(shells) do
-        if shell == "cmd" or shell == "clink" then
+        if not M.safe_name(shell) then
+            print("  rejected unsafe shell name: " .. tostring(shell))
+        elseif shell == "cmd" or shell == "clink" then
             print("  zoxide has NO native clink init (third-party clink-zoxide only); skipped")
         else
             local tok = M.token(shell)
@@ -207,6 +227,13 @@ end
 
 function M.alias_add(name, value)
     -- Native cmd.exe alias = doskey macro; Clink Lua alias API is read-only.
+    -- SECURITY: name/value reach cmd.exe unescaped -> validate and reject.
+    if not M.safe_name(name) then
+        print("  rejected unsafe alias name: " .. tostring(name)); return
+    end
+    if M.cmd_unsafe(value) then
+        print("  rejected unsafe alias value: " .. tostring(value)); return
+    end
     os.execute('doskey ' .. name .. '=' .. value)
     local file = M.root() .. "/alias.cmd"
     local lines = {}
@@ -220,6 +247,9 @@ function M.alias_add(name, value)
 end
 
 function M.alias_remove(name)
+    if not M.safe_name(name) then
+        print("  rejected unsafe alias name: " .. tostring(name)); return
+    end
     os.execute('doskey ' .. name .. '=')
     local file = M.root() .. "/alias.cmd"
     local body = M.read(file)
@@ -259,20 +289,27 @@ function completer(action, ...)
     end
 
     local shell = action
+    if not M.safe_name(shell) then
+        print("rejected unsafe shell name: " .. tostring(shell)); return
+    end
     local tok = M.token(shell)
     local ext = M.ext(shell)
     local progs = (#args > 0) and args or { "opencode" }
     for _, prog in ipairs(progs) do
-        print("Generating " .. prog .. " completions for " .. shell .. "...")
-        local out = dir .. "/" .. shell .. "-" .. prog .. "-completion." .. ext
-        local text = M.program_output(prog, tok)
-        if not text then print("  no completion for " .. prog .. " (" .. shell .. ")") return end
-        M.backup(out)
-        local block = string.format(M.MARK_B, prog, shell) .. " generated " .. os.date("%FT%T") .. "\n" ..
-                      text .. "\n" .. string.format(M.MARK_E, prog, shell) .. "\n"
-        M.write(out, block)
-        print("  wrote -> " .. out)
-        M.link(M.main_config(shell), out, shell)
+        if not M.safe_name(prog) then
+            print("  rejected unsafe program name: " .. tostring(prog))
+        else
+            print("Generating " .. prog .. " completions for " .. shell .. "...")
+            local out = dir .. "/" .. shell .. "-" .. prog .. "-completion." .. ext
+            local text = M.program_output(prog, tok)
+            if not text then print("  no completion for " .. prog .. " (" .. shell .. ")") return end
+            M.backup(out)
+            local block = string.format(M.MARK_B, prog, shell) .. " generated " .. os.date("%FT%T") .. "\n" ..
+                          text .. "\n" .. string.format(M.MARK_E, prog, shell) .. "\n"
+            M.write(out, block)
+            print("  wrote -> " .. out)
+            M.link(M.main_config(shell), out, shell)
+        end
     end
     pcall(M.self)
 end

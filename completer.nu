@@ -26,11 +26,22 @@ def completer-token [shell: string] {
 
 def completer-ext [shell: string] {
     match ($shell | str lowercase) {
-        'pwsh' => 'ps1'
+        'pwsh' | 'powershell' => 'ps1'
         'nu' | 'nushell' => 'nu'
         'xonsh' => 'xsh'
         _ => ($shell | str lowercase)
     }
+}
+
+# Reject names that could traverse the completions dir or inject code when the
+# generated file is sourced. No '/', '\', '..', newline, or shell metachar.
+def completer-valid-name [name: string] {
+    if ($name | is-empty) { return false }
+    if ($name | str contains '..') { return false }
+    for bad in ['/' '\' ' ' ';' '|' '&' '$' '`' '<' '>' '(' ')' "\n"] {
+        if ($name | str contains $bad) { return false }
+    }
+    true
 }
 
 def completer-main-config [shell: string] {
@@ -43,13 +54,11 @@ def completer-main-config [shell: string] {
     }
 }
 
-# Re-run safety: copy existing target to a timestamped .bak before touching it.
+# Re-run safety: keep ONE fixed .bak per target (overwrite) before touching it.
 def completer-backup [path: string] {
     if not ($path | path exists) { return }
-    let stamp = (date now | format date '%Y%m%d-%H%M%S')
-    let dest = $"($path).bak.($stamp)"
-    if not ($dest | path exists) { cp $path $dest }
-    print $"  backup -> ($dest)"
+    cp $path $"($path).bak"
+    print $"  backup -> ($path).bak"
 }
 
 def completer-capture [cmd: string, args: list<string>] {
@@ -90,17 +99,17 @@ def completer-native-spec [shell: string] {
 }
 
 def completer-program-output [program: string, shell: string, token: string] {
-    for probe in [
-        [$program 'completion' '--shell' $token]
-        [$program 'completion' '-s' $token]
-        [$program 'completion' $token]
-        [$program 'completions' $token]
-        [$program '--generate-completion' $token]
-        [$program '--completions' $token]
-    ] {
-        let cmd = $probe | first
-        if (which $cmd | is-not-empty) {
-            let out = (completer-capture $cmd ($probe | skip 1))
+    # Resolve the program once; the first successful probe returns immediately.
+    if (which $program | is-not-empty) {
+        for probe in [
+            [$program 'completion' '--shell' $token]
+            [$program 'completion' '-s' $token]
+            [$program 'completion' $token]
+            [$program 'completions' $token]
+            [$program '--generate-completion' $token]
+            [$program '--completions' $token]
+        ] {
+            let out = (completer-capture $program ($probe | skip 1))
             if ($out != null) { return $out }
         }
     }
@@ -114,7 +123,7 @@ def completer-program-output [program: string, shell: string, token: string] {
 
 # Nushell files always install the documented external completer closure form.
 def completer-nu-script [program: string, captured: any] {
-    let external = "# >>> completer:external:nu >>>\n$env.config.completions.external.completer = {|place| carapace $place.command.0 nushell ...$place.command | from json }\n# <<< completer:external:nu <<<\n"
+    let external = "# >>> completer:external:nu >>>\n$env.config.completions.external.completer = {|place| if ($place.command.0 | is-empty) { null } else if (which carapace | is-empty) { null } else { carapace $place.command.0 nushell ...$place.command | from json } }\n# <<< completer:external:nu <<<\n"
     if ($captured != null) {
         $"($external)\n($captured)\n"
     } else {
@@ -125,6 +134,7 @@ def completer-nu-script [program: string, captured: any] {
 # --- alias management --------------------------------------------------------
 
 def add-alias [name: string, value: string] {
+    if not (completer-valid-name $name) { print $"invalid alias name: ($name)"; return }
     let file = ((completer-root) | path join "alias.nu")
     let line = $"alias ($name) = ($value)"
     if ($file | path exists) {
@@ -138,6 +148,7 @@ def add-alias [name: string, value: string] {
 }
 
 def remove-alias [name: string] {
+    if not (completer-valid-name $name) { print $"invalid alias name: ($name)"; return }
     let file = ((completer-root) | path join "alias.nu")
     if not ($file | path exists) { return }
     completer-backup $file
@@ -164,7 +175,6 @@ def completer-update-carapace [] {
             completer-backup $out
             $r.stdout | save -f $out
             print $"  indexed: ($sh) -> ($out)"
-            completer-link (completer-main-config $sh) $out $sh
         }
     }
     print "Carapace index refreshed."
@@ -172,6 +182,7 @@ def completer-update-carapace [] {
 
 def completer-add-zoxide [shell: string] {
     if (which zoxide | is-empty) { print "zoxide not found; nothing to do"; return }
+    if not (completer-valid-name $shell) { print $"invalid shell name: ($shell)"; return }
     let sl = ($shell | str lowercase)
     let token = (completer-token $sl)
     let r = if ($sl in ['pwsh' 'powershell']) {
@@ -208,6 +219,7 @@ export def completer [
     let dir = ($root | path join "completions")
     if not ($dir | path exists) { mkdir $dir }
     let sl = ($action | str lowercase)
+    if not (completer-valid-name $sl) { print $"invalid shell name: ($action)"; return }
     match $sl {
         'list' => {
             ls $dir
@@ -240,6 +252,7 @@ export def completer [
             let ext = (completer-ext $sl)
             let progs = if ($programs | is-empty) { ['opencode'] } else { $programs }
             for prog in $progs {
+                if not (completer-valid-name $prog) { print $"  invalid program name: ($prog) (skipped)"; continue }
                 print $"Generating ($prog) completions for ($sl)..."
                 let out = ($dir | path join $"($sl)-($prog)-completion.($ext)" | path expand)
                 let captured = (completer-program-output $prog $sl $token)

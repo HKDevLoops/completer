@@ -24,11 +24,20 @@ end
 
 function _completer_ext -a shell
     switch $shell
-        case nu; printf 'nu'
+        case nu nushell; printf 'nu'
         case xonsh; printf 'xsh'
-        case pwsh; printf 'ps1'
+        case pwsh powershell; printf 'ps1'
         case '*'; printf '%s' $shell
     end
+end
+
+# Reject names that could traverse the completions dir or inject code when the
+# generated file is sourced. No '/', '\', '..', newline, or shell metachar.
+function _completer_valid_name -a name
+    test -n "$name"; or return 1
+    string match -qr '\.\.' -- "$name"; and return 1
+    string match -qr '[/\\ ;|&$`<>()\n]' -- "$name"; and return 1
+    return 0
 end
 
 function _completer_capture
@@ -39,9 +48,10 @@ function _completer_capture
 end
 
 function _completer_program_output -a prog shell tok
-    for a in "completion --shell $tok" "completion -s $tok" "completion $tok" \
-             "completions $tok" "--generate-completion $tok" "--completions $tok"
-        if command -q $prog
+    # Resolve the program once; the first successful probe returns immediately.
+    if command -q $prog
+        for a in "completion --shell $tok" "completion -s $tok" "completion $tok" \
+                 "completions $tok" "--generate-completion $tok" "--completions $tok"
             set -l out (_completer_capture $prog (string split ' ' -- $a)); and begin
                 printf '%s\n' $out; return 0
             end
@@ -57,8 +67,7 @@ end
 
 function _completer_backup -a path
     test -f "$path"; or return 0
-    set -l stamp (date +%Y%m%d-%H%M%S)
-    cp -- "$path" "$path.bak.$stamp"; and printf '  backup -> %s.bak.%s\n' $path $stamp
+    cp -- "$path" "$path.bak"; and printf '  backup -> %s.bak\n' $path
 end
 
 function _completer_main_config -a shell
@@ -91,6 +100,9 @@ function _completer_link -a config file shell
 end
 
 function add-alias -a name
+    if not _completer_valid_name $name
+        printf 'invalid alias name: %s\n' $name; return 1
+    end
     set -l value (string join ' ' $argv[2..-1])
     set -l file (_completer_root)/alias.fish
     mkdir -p (path dirname $file)
@@ -103,6 +115,9 @@ function add-alias -a name
 end
 
 function remove-alias -a name
+    if not _completer_valid_name $name
+        printf 'invalid alias name: %s\n' $name; return 1
+    end
     set -l file (_completer_root)/alias.fish
     test -f $file; or return 0
     set -l keep (grep -vE "^[[:space:]]*alias[[:space:]]+$name=" $file)
@@ -134,6 +149,9 @@ end
 function _completer_zoxide -a shell
     if not command -q zoxide
         printf 'zoxide not found; nothing to do\n'; return 0
+    end
+    if not _completer_valid_name $shell
+        printf 'invalid shell name: %s\n' $shell; return 1
     end
     set -l tok (_completer_token $shell)
     test "$shell" = sh; and set tok posix
@@ -178,8 +196,14 @@ function completer -a action
     end
 
     set -l shell $action
+    if not _completer_valid_name $shell
+        printf 'invalid shell name: %s\n' $shell; return 1
+    end
     set -l tok (_completer_token $shell); set -l ext (_completer_ext $shell)
     for prog in $progs
+        if not _completer_valid_name $prog
+            printf '  invalid program name: %s (skipped)\n' $prog; continue
+        end
         printf 'Generating %s completions for %s...\n' $prog $shell
         set -l out $dir/$shell-$prog-completion.$ext
         set -l text (_completer_program_output $prog $shell $tok); or begin

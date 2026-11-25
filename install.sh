@@ -6,12 +6,27 @@
 #                  (use zsh | fish | sh instead, or omit -s to auto-detect)
 # Usage (local):   sh ./install.sh           (auto-detect from $SHELL)
 #                  sh ./install.sh zsh       (force a shell)
+#                  COMPLETER_SHA256=<hex> sh ./install.sh bash  (verify fetch)
 # Detects OS + main config, asks permission, backs up the old completer file,
 # writes the new one, and adds ONE guarded source line. POSIX-sh compatible.
-# Native APIs only: curl/wget, cp, grep, date, mkdir, printf, read, uname.
+# Native APIs only: curl/wget, cp, grep, date, mkdir, mktemp, mv, chmod, tr,
+#                   sha256sum/shasum/openssl, printf, read, uname.
+#
+# Trust model: this script runs as the invoking user and installs a file that
+# the user's shell will later `source`, so downloaded bytes are executable code.
+# By default the only authentication is TLS to COMPLETER_RAW_BASE; `-f` makes
+# HTTP errors fatal and `--proto '=https' --tlsv1.2` forbids cleartext fetches
+# and downgrade redirects. For a verifiable install set COMPLETER_SHA256 to the
+# expected sha256 (upper- or lowercase) of completer.<shell>; the staged bytes
+# are checked before install/link and discarded on mismatch. With no checksum
+# you trust the host and its TLS chain. Fetching goes through a private mktemp
+# path under umask 077; installed files and directories are chmod 600/700 so
+# alias data is not world-readable and cannot be clobbered via a pre-created
+# symlink at the target path.
 # ============================================================================
 
 set -e
+umask 077
 
 RAW_BASE=${COMPLETER_RAW_BASE:-https://<RAW-BASE>}
 
@@ -51,13 +66,67 @@ ic_backup() {
 
 ic_fetch() {
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$1" -o "$2"
+        curl -f -s -S -L --proto '=https' --tlsv1.2 "$1" -o "$2"
     elif command -v wget >/dev/null 2>&1; then
         wget -q "$1" -O "$2"
     else
         printf 'error: need curl or wget to fetch %s\n' "$1" >&2
         return 1
     fi
+}
+
+# Private staging directory. mktemp is atomic; the fallback uses mkdir (also
+# atomic) so an attacker cannot pre-place a symlink at a predictable path.
+ic_tmp_dir() {
+    _ic_td=
+    if command -v mktemp >/dev/null 2>&1; then
+        _ic_td=$(mktemp -d "${TMPDIR:-/tmp}/completer.XXXXXX" 2>/dev/null) || _ic_td=
+        if [ -n "$_ic_td" ]; then
+            printf '%s' "$_ic_td"
+            return 0
+        fi
+    fi
+    _ic_td="${TMPDIR:-/tmp}/completer.$$"
+    (umask 077; mkdir "$_ic_td") 2>/dev/null || return 1
+    printf '%s' "$_ic_td"
+}
+
+# Native sha256 helpers; prints lowercase hex or fails if no tool exists.
+ic_hash() {
+    _ic_line=
+    if command -v sha256sum >/dev/null 2>&1; then
+        _ic_line=$(sha256sum "$1" 2>/dev/null) || return 1
+        _ic_h=${_ic_line%% *}
+    elif command -v shasum >/dev/null 2>&1; then
+        _ic_line=$(shasum -a 256 "$1" 2>/dev/null) || return 1
+        _ic_h=${_ic_line%% *}
+    elif command -v openssl >/dev/null 2>&1; then
+        _ic_line=$(openssl dgst -sha256 "$1" 2>/dev/null) || return 1
+        _ic_h=${_ic_line##* }
+    else
+        return 1
+    fi
+    printf '%s' "$_ic_h" | tr 'A-Z' 'a-z'
+}
+
+# Optional integrity gate: $1=file, $2=expected sha256 (empty means skip).
+ic_verify() {
+    _ic_file=$1; _ic_want=$2
+    [ -n "$_ic_want" ] || return 0
+    if ! command -v sha256sum >/dev/null 2>&1 &&
+       ! command -v shasum >/dev/null 2>&1 &&
+       ! command -v openssl >/dev/null 2>&1; then
+        printf 'error: COMPLETER_SHA256 set but no sha256 tool available\n' >&2
+        return 1
+    fi
+    _ic_got=$(ic_hash "$_ic_file") || return 1
+    _ic_want=$(printf '%s' "$_ic_want" | tr 'A-Z' 'a-z')
+    if [ "$_ic_got" != "$_ic_want" ]; then
+        printf 'error: sha256 mismatch for %s\n  got      %s\n  expected %s\n' \
+            "$_ic_file" "$_ic_got" "$_ic_want" >&2
+        return 1
+    fi
+    ic_say '  sha256 verified'
 }
 
 ic_script_dir() {
@@ -101,20 +170,34 @@ case "$ANSWER" in
     *) ic_say 'Aborted.'; exit 0 ;;
 esac
 
-# Back up + write the function file (local folder first, download second).
-ic_backup "$TARGET"
+# Create the private destination directory before installing anything.
+CONFIG_DIR=$(dirname "$MAIN")
+mkdir -p "$CONFIG_DIR"
+chmod 700 "$CONFIG_DIR" 2>/dev/null || true
+
+# Stage locally, verify, then move into place. Never write fetched code
+# directly to the path that the shell rc sources.
+ic_tmp=$(ic_tmp_dir) || { printf 'error: cannot create private temp dir\n' >&2; exit 1; }
+trap 'rm -rf "$ic_tmp"' 0 1 2 15
+STAGE="$ic_tmp/completer.$EXT"
+
 SRC="$(ic_script_dir)/completer.$EXT"
 if [ -f "$SRC" ]; then
-    cp "$SRC" "$TARGET"
+    cp "$SRC" "$STAGE"
 else
     ic_say "  Fetching $RAW_BASE/completer.$EXT ..."
-    ic_fetch "$RAW_BASE/completer.$EXT" "$TARGET"
+    ic_fetch "$RAW_BASE/completer.$EXT" "$STAGE"
 fi
+ic_verify "$STAGE" "${COMPLETER_SHA256:-}" || exit 1
+
+ic_backup "$TARGET"
+mv "$STAGE" "$TARGET"
+chmod 600 "$TARGET" 2>/dev/null || true
 ic_say "  wrote -> $TARGET"
 
-# Ensure the main config exists before appending.
-mkdir -p "$(dirname "$MAIN")"
+# Ensure the main config exists before appending; keep it private.
 [ -f "$MAIN" ] || : > "$MAIN"
+chmod 600 "$MAIN" 2>/dev/null || true
 
 # Add ONE guarded source line.
 if ! grep -qF "$MARKER" "$MAIN"; then

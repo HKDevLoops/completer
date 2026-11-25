@@ -7,6 +7,7 @@
 # Native APIs used (all documented in the official references below):
 #   fn / var / set / if-elif / for / put / echo / count / eq / has-env / has-external
 #   external / eval / slurp / del                      -> elv.sh/ref/builtin.html, language.html
+#   str:contains-any / str:contains                    -> elv.sh/ref/str.html
 #   set edit:completion:arg-completer[cmd] = {|@args| ... }  -> elv.sh/ref/edit.html
 #   set edit:command-abbr['name'] = 'value'            -> elv.sh/ref/edit.html (alias replacement)
 #   eval (carapace _carapace|slurp)                    -> carapace-sh.github.io setup#elvish
@@ -17,6 +18,7 @@
 #   https://elv.sh/ref/edit.html
 #   https://elv.sh/ref/builtin.html
 #   https://elv.sh/ref/language.html
+#   https://elv.sh/ref/str.html
 #   https://carapace-sh.github.io/carapace-bin/setup.html#elvish
 #   https://github.com/ajeetdsouza/zoxide#setup-zoxide-on-your-shell
 #
@@ -46,10 +48,20 @@ fn _completer-token {|shell|
 }
 
 fn _completer-ext {|shell|
-    if (eq $shell nu) { put nu; return }
+    if (or (eq $shell nu) (eq $shell nushell)) { put nu; return }
     if (eq $shell xonsh) { put xsh; return }
-    if (eq $shell pwsh) { put ps1; return }
+    if (or (eq $shell pwsh) (eq $shell powershell)) { put ps1; return }
     put $shell
+}
+
+# Reject names that could escape the completions dir or inject generated text.
+# Safe code points only; explicit '..' rejection.
+fn _completer-valid-name {|name|
+    if (eq $name '') { put $false; return }
+    var bad = '/;|&$`<>()\'"\n"
+    if (str:contains-any $name $bad) { put $false; return }
+    if (str:contains $name '..') { put $false; return }
+    put $true
 }
 
 # Emit captured stdout as one string; emit '' on any failure or absent program.
@@ -60,11 +72,30 @@ fn _completer-capture {|prog @args|
     if (eq $status $ok) { put $raw } else { put '' }
 }
 
+# Single fixed backup per target (overwrite; no .bak.<stamp> accumulation).
 fn _completer-backup {|file|
     if (not ?(test -f $file)) { return }
-    var stamp = (date +%Y%m%d-%H%M%S)
-    var ignored = ?(cp -- $file $file'.bak.'$stamp)
-    echo '  backup -> '$file'.bak.'$stamp
+    var ignored = ?(cp -- $file $file'.bak')
+    echo '  backup -> '$file'.bak'
+}
+
+# Idempotent generated block: rewrite in place (one block) when the begin marker
+# exists, otherwise append. Callers back up the target before invoking this.
+fn _completer-write-block {|out prog shell text|
+    var begin = '# >>> completer:'$prog':'$shell
+    if ?(test -f $out) {
+        if ?(grep -qF -- $begin $out) {
+            echo '' > $out
+        } else {
+            echo '' >> $out
+        }
+    } else {
+        echo '' >> $out
+    }
+    var stamp = (date -Is)
+    echo '# >>> completer:'$prog':'$shell' generated '$stamp' >>>' >> $out
+    echo $text >> $out
+    echo '# <<< completer:'$prog':'$shell' <<<' >> $out
 }
 
 fn _completer-main-config {|shell|
@@ -159,6 +190,7 @@ fn _completer-update-carapace {
 
 fn _completer-zoxide {|shell|
     if (not (has-external zoxide)) { echo 'zoxide not found; nothing to do'; return }
+    if (not (_completer-valid-name $shell)) { echo 'invalid shell name: '$shell; return }
     var dir = (_completer-root)'/completions'
     var ignored = ?(mkdir -p $dir)
     var tok = (_completer-token $shell)
@@ -178,6 +210,7 @@ fn _completer-zoxide {|shell|
 }
 
 fn _completer-alias-add {|name @value|
+    if (not (_completer-valid-name $name)) { echo 'invalid alias name: '$name; return }
     var val = (echo $@value)
     var root = (_completer-root)
     var ignored = ?(mkdir -p $root)
@@ -194,6 +227,7 @@ fn _completer-alias-add {|name @value|
 }
 
 fn _completer-alias-remove {|name|
+    if (not (_completer-valid-name $name)) { echo 'invalid alias name: '$name; return }
     var file = (_completer-root)'/alias.elv'
     var pat = "edit:command-abbr['"$name"']"
     if ?(test -f $file) {
@@ -243,20 +277,19 @@ fn completer {|action @args|
     }
 
     var shell = $action
+    if (not (_completer-valid-name $shell)) { echo 'invalid shell name: '$shell; return }
     var tok = (_completer-token $shell)
     var ext = (_completer-ext $shell)
     var progs = $args
     if (eq (count $progs) 0) { set progs = [opencode] }
     for prog $progs {
+        if (not (_completer-valid-name $prog)) { echo 'invalid program name: '$prog; continue }
         echo 'Generating '$prog' completions for '$shell'...'
         var out = $dir'/'$shell'-'$prog'-completion.'$ext
         var text = (_completer-program-output $prog $shell $tok)
         if (eq $text '') { echo '  no completion for '$prog' ('$shell')'; continue }
-        var stamp = (_completer-capture date -Is)
         _completer-backup $out
-        echo '# >>> completer:'$prog':'$shell' generated '$stamp' >>>' >> $out
-        echo $text >> $out
-        echo '# <<< completer:'$prog':'$shell' <<<' >> $out
+        _completer-write-block $out $prog $shell $text
         echo '  wrote -> '$out
         _completer-link (_completer-main-config $shell) $out $shell
     }

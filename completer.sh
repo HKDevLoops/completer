@@ -21,9 +21,24 @@ _completer_token() {
 
 _completer_ext() {
     case "$1" in
-        nu) printf 'nu' ;; xonsh) printf 'xsh' ;; pwsh) printf 'ps1' ;;
+        nu|nushell) printf 'nu' ;; xonsh) printf 'xsh' ;; pwsh|powershell) printf 'ps1' ;;
         *) printf '%s' "$1" ;;
     esac
+}
+
+# Reject names that could traverse the completions dir or inject code when the
+# generated file is sourced. No '/', '\', '..', newline, or shell metachar.
+# POSIX sh has no local: use prefixed globals to avoid collisions.
+_completer_valid_name() {
+    _cvn_name=$1
+    [ -n "$_cvn_name" ] || return 1
+    case "$_cvn_name" in *..*) return 1 ;; esac
+    _cvn_nl='
+'
+    for _cvn_bad in / '\' ' ' ';' '|' '&' '$' '`' '<' '>' '(' ')' "$_cvn_nl"; do
+        case "$_cvn_name" in *"$_cvn_bad"*) return 1 ;; esac
+    done
+    return 0
 }
 
 _completer_capture() {
@@ -35,12 +50,14 @@ _completer_capture() {
 
 _completer_program_output() {
     _cpo_prog=$1 _cpo_shell=$2 _cpo_tok=$3
-    for _cpo_a in "completion --shell $_cpo_tok" "completion -s $_cpo_tok" "completion $_cpo_tok" \
-             "completions $_cpo_tok" "--generate-completion $_cpo_tok" "--completions $_cpo_tok"; do
-        command -v "$_cpo_prog" >/dev/null 2>&1 || continue
-        _cpo_text=$(_completer_capture "$_cpo_prog" $_cpo_a) || continue
-        printf '%s' "$_cpo_text"; return 0
-    done
+    # Resolve the program once; the first successful probe returns immediately.
+    if command -v "$_cpo_prog" >/dev/null 2>&1; then
+        for _cpo_a in "completion --shell $_cpo_tok" "completion -s $_cpo_tok" "completion $_cpo_tok" \
+                 "completions $_cpo_tok" "--generate-completion $_cpo_tok" "--completions $_cpo_tok"; do
+            _cpo_text=$(_completer_capture "$_cpo_prog" $_cpo_a) || continue
+            printf '%s' "$_cpo_text"; return 0
+        done
+    fi
     if command -v carapace >/dev/null 2>&1; then
         _cpo_text=$(_completer_capture carapace "$_cpo_prog" "$_cpo_tok") || return 1
         printf '%s' "$_cpo_text"; return 0
@@ -50,8 +67,7 @@ _completer_program_output() {
 
 _completer_backup() {
     [ -f "$1" ] || return 0
-    _cb_stamp=$(date +%Y%m%d-%H%M%S)
-    cp -- "$1" "$1.bak.$_cb_stamp" && printf '  backup -> %s.bak.%s\n' "$1" "$_cb_stamp"
+    cp -- "$1" "$1.bak" && printf '  backup -> %s.bak\n' "$1"
 }
 
 _completer_main_config() {
@@ -84,6 +100,7 @@ _completer_link() {
 
 add_alias() {
     name=$1; shift; value="$*"
+    if ! _completer_valid_name "$name"; then printf 'invalid alias name: %s\n' "$name"; return 1; fi
     file="$(_completer_root)/alias.sh"
     mkdir -p "$(dirname "$file")"
     [ -f "$file" ] || printf '# alias.sh - managed by completer\n' > "$file"
@@ -95,6 +112,7 @@ add_alias() {
 
 remove_alias() {
     name=$1
+    if ! _completer_valid_name "$name"; then printf 'invalid alias name: %s\n' "$name"; return 1; fi
     file="$(_completer_root)/alias.sh"
     [ -f "$file" ] || return 0
     grep -vE "^[[:space:]]*alias[[:space:]]+$name=" "$file" > "$file.tmp" && mv "$file.tmp" "$file"
@@ -125,6 +143,7 @@ completer_update_carapace() {
 _completer_zoxide() {
     command -v zoxide >/dev/null 2>&1 || { printf 'zoxide not found; nothing to do\n'; return 0; }
     _cz_shell=$1
+    if ! _completer_valid_name "$_cz_shell"; then printf 'invalid shell name: %s\n' "$_cz_shell"; return 1; fi
     _cz_tok=$(_completer_token "$_cz_shell")
     [ "$_cz_shell" = sh ] && _cz_tok=posix
     if [ "$_cz_shell" = bash ] || [ "$_cz_shell" = zsh ]; then
@@ -180,8 +199,11 @@ completer() {
             esac
             return 0 ;;
     esac
-    shell=$action tok=$(_completer_token "$shell"); ext=$(_completer_ext "$shell")
+    shell=$action
+    if ! _completer_valid_name "$shell"; then printf 'invalid shell name: %s\n' "$shell"; return 1; fi
+    tok=$(_completer_token "$shell"); ext=$(_completer_ext "$shell")
     for prog in "$@"; do
+        if ! _completer_valid_name "$prog"; then printf '  invalid program name: %s (skipped)\n' "$prog"; continue; fi
         printf 'Generating %s completions for %s...\n' "$prog" "$shell"
         out="$dir/$shell-$prog-completion.$ext"
         text=$(_completer_program_output "$prog" "$shell" "$tok") || { printf '  no completion for %s (%s)\n' "$prog" "$shell"; continue; }

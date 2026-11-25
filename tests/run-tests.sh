@@ -69,6 +69,11 @@ if command -v xonsh >/dev/null 2>&1; then
       && pass "xonsh source completer.xsh" || fail "xonsh source completer.xsh"
 fi
 
+# Functional tests actually invoke the functions (when bash is present).
+if command -v bash >/dev/null 2>&1 && [ -f "$ROOT/tests/functional.sh" ]; then
+    bash "$ROOT/tests/functional.sh" || FAIL=$((FAIL+1))
+fi
+
 echo "== result =="
 if [ "$FAIL" -eq 0 ]; then echo "ALL TESTS PASSED"; exit 0; fi
 echo "$FAIL TEST(S) FAILED"; exit 1

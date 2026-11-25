@@ -46,9 +46,18 @@ _completer_token() {
 
 _completer_ext() {
     case "$1" in
-        nu) printf 'nu' ;; xonsh) printf 'xsh' ;; pwsh) printf 'ps1' ;;
+        nu|nushell) printf 'nu' ;; xonsh) printf 'xsh' ;; pwsh|powershell) printf 'ps1' ;;
         *) printf '%s' "$1" ;;
     esac
+}
+
+# Reject names that could escape the completions dir or inject generated text.
+# Safe set: letters, digits, '_', '.', '-'; plus explicit '..' rejection.
+_completer_valid_name() {
+    case "$1" in
+        ''|*[!A-Za-z0-9_.-]*|*'..'*) return 1 ;;
+    esac
+    return 0
 }
 
 _completer_capture() {
@@ -72,10 +81,26 @@ _completer_program_output() {
     return 1
 }
 
+# Single fixed backup per target: overwrites instead of accumulating .bak.<stamp>.
 _completer_backup() {
     [ -f "$1" ] || return 0
-    _cb_stamp=$(date +%Y%m%d-%H%M%S)
-    cp -- "$1" "$1.bak.$_cb_stamp" && printf '  backup -> %s.bak.%s\n' "$1" "$_cb_stamp"
+    cp -- "$1" "$1.bak" && printf '  backup -> %s.bak\n' "$1"
+}
+
+# Idempotent generated block: rewrite in place (one block) when the begin marker
+# is already present, otherwise append. Callers back up the target first.
+_completer_write_block() {
+    _cwb_out=$1 _cwb_prog=$2 _cwb_shell=$3 _cwb_text=$4
+    _cwb_begin="# >>> completer:$_cwb_prog:$_cwb_shell"
+    if [ -f "$_cwb_out" ] && grep -qF -- "$_cwb_begin" "$_cwb_out"; then
+        { printf '\n# >>> completer:%s:%s generated %s >>>\n' "$_cwb_prog" "$_cwb_shell" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          printf '%s\n' "$_cwb_text"
+          printf '\n# <<< completer:%s:%s <<<\n' "$_cwb_prog" "$_cwb_shell"; } > "$_cwb_out"
+    else
+        { printf '\n# >>> completer:%s:%s generated %s >>>\n' "$_cwb_prog" "$_cwb_shell" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          printf '%s\n' "$_cwb_text"
+          printf '\n# <<< completer:%s:%s <<<\n' "$_cwb_prog" "$_cwb_shell"; } >> "$_cwb_out"
+    fi
 }
 
 _completer_main_config() {
@@ -111,6 +136,7 @@ _completer_link() {
 
 _add_alias() {
     _ca_name=$1; shift; _ca_value="$*"
+    _completer_valid_name "$_ca_name" || { printf 'invalid alias name: %s\n' "$_ca_name"; return 1; }
     _ca_file="$(_completer_root)/alias.ksh"
     mkdir -p "$(dirname "$_ca_file")"
     [ -f "$_ca_file" ] || printf '# alias.ksh - managed by completer\n' > "$_ca_file"
@@ -122,6 +148,7 @@ _add_alias() {
 
 _remove_alias() {
     _cr_name=$1
+    _completer_valid_name "$_cr_name" || { printf 'invalid alias name: %s\n' "$_cr_name"; return 1; }
     _cr_file="$(_completer_root)/alias.ksh"
     [ -f "$_cr_file" ] || return 0
     grep -vE "^[[:space:]]*alias[[:space:]]+$_cr_name=" "$_cr_file" > "$_cr_file.tmp" && mv "$_cr_file.tmp" "$_cr_file"
@@ -165,6 +192,7 @@ _completer_update_carapace() {
 _completer_zoxide() {
     command -v zoxide >/dev/null 2>&1 || { printf 'zoxide not found; nothing to do\n'; return 0; }
     _cz_shell=$1
+    _completer_valid_name "$_cz_shell" || { printf 'invalid shell name: %s\n' "$_cz_shell"; return 1; }
     _cz_tok=$(_completer_token "$_cz_shell")
     # No ksh-specific init exists: fall back to documented generic POSIX target.
     case "$_cz_shell" in
@@ -207,15 +235,15 @@ completer() {
     esac
 
     typeset shell=$action tok ext prog out text
+    _completer_valid_name "$shell" || { printf 'invalid shell name: %s\n' "$shell"; return 1; }
     tok=$(_completer_token "$shell"); ext=$(_completer_ext "$shell")
     for prog in "${progs[@]}"; do
+        _completer_valid_name "$prog" || { printf 'invalid program name: %s\n' "$prog"; continue; }
         printf 'Generating %s completions for %s...\n' "$prog" "$shell"
         out="$dir/$shell-$prog-completion.$ext"
         text=$(_completer_program_output "$prog" "$shell" "$tok") || { printf '  no completion for %s (%s)\n' "$prog" "$shell"; continue; }
         _completer_backup "$out"
-        { printf '\n# >>> completer:%s:%s generated %s >>>\n' "$prog" "$shell" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          printf '%s\n' "$text"
-          printf '\n# <<< completer:%s:%s <<<\n' "$prog" "$shell"; } >> "$out"
+        _completer_write_block "$out" "$prog" "$shell" "$text"
         printf '  wrote -> %s\n' "$out"
         _completer_link "$(_completer_main_config "$shell")" "$out" "$shell"
     done

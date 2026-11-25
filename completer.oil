@@ -45,9 +45,17 @@ _completer_token() {
 
 _completer_ext() {
     case "$1" in
-        nu) printf 'nu' ;; xonsh) printf 'xsh' ;; pwsh) printf 'ps1' ;;
+        nu|nushell) printf 'nu' ;; xonsh) printf 'xsh' ;; pwsh|powershell) printf 'ps1' ;;
         *) printf '%s' "$1" ;;
     esac
+}
+
+# Reject names that could escape the completions dir or inject generated text.
+_completer_valid_name() {
+    case "$1" in
+        ''|*[!A-Za-z0-9_.-]*|*'..'*) return 1 ;;
+    esac
+    return 0
 }
 
 _completer_capture() {
@@ -70,10 +78,26 @@ _completer_program_output() {
     return 1
 }
 
+# Single fixed backup per target (overwrite, no unbounded .bak.<stamp> growth).
 _completer_backup() {
     [ -f "$1" ] || return 0
-    local stamp; stamp=$(date +%Y%m%d-%H%M%S)
-    cp -- "$1" "$1.bak.$stamp" && printf '  backup -> %s.bak.%s\n' "$1" "$stamp"
+    cp -- "$1" "$1.bak" && printf '  backup -> %s.bak\n' "$1"
+}
+
+# Idempotent generated block: rewrite in place (one block) when the begin marker
+# exists, otherwise append. Callers back up the target before invoking this.
+_completer_write_block() {
+    local out=$1 prog=$2 shell=$3 text=$4
+    local begin="# >>> completer:$prog:$shell"
+    if [ -f "$out" ] && grep -qF -- "$begin" "$out"; then
+        { printf '\n# >>> completer:%s:%s generated %s >>>\n' "$prog" "$shell" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          printf '%s\n' "$text"
+          printf '\n# <<< completer:%s:%s <<<\n' "$prog" "$shell"; } > "$out"
+    else
+        { printf '\n# >>> completer:%s:%s generated %s >>>\n' "$prog" "$shell" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          printf '%s\n' "$text"
+          printf '\n# <<< completer:%s:%s <<<\n' "$prog" "$shell"; } >> "$out"
+    fi
 }
 
 _completer_main_config() {
@@ -110,6 +134,7 @@ _completer_link() {
 
 add-alias() {
     local name=$1; shift; local value="$*"
+    _completer_valid_name "$name" || { printf 'invalid alias name: %s\n' "$name"; return 1; }
     local file; file="$(_completer_root)/alias.oil"
     mkdir -p "$(dirname "$file")"
     [ -f "$file" ] || printf '# alias.oil - managed by completer\n' > "$file"
@@ -121,6 +146,7 @@ add-alias() {
 
 remove-alias() {
     local name=$1
+    _completer_valid_name "$name" || { printf 'invalid alias name: %s\n' "$name"; return 1; }
     local file; file="$(_completer_root)/alias.oil"
     [ -f "$file" ] || return 0
     grep -vE "^[[:space:]]*alias[[:space:]]+$name=" "$file" > "$file.tmp" && mv "$file.tmp" "$file"
@@ -180,6 +206,7 @@ _completer_update_carapace() {
 _completer_zoxide() {
     command -v zoxide >/dev/null 2>&1 || { printf 'zoxide not found; nothing to do\n'; return 0; }
     local shell=$1 tok out text
+    _completer_valid_name "$shell" || { printf 'invalid shell name: %s\n' "$shell"; return 1; }
     tok=$(_completer_token "$shell")
     # No osh/ysh init: use documented generic POSIX target.
     case "$shell" in
@@ -222,15 +249,15 @@ completer() {
     esac
 
     local shell=$action tok ext prog out text
+    _completer_valid_name "$shell" || { printf 'invalid shell name: %s\n' "$shell"; return 1; }
     tok=$(_completer_token "$shell"); ext=$(_completer_ext "$shell")
     for prog in "${progs[@]}"; do
+        _completer_valid_name "$prog" || { printf 'invalid program name: %s\n' "$prog"; continue; }
         printf 'Generating %s completions for %s...\n' "$prog" "$shell"
         out="$dir/$shell-$prog-completion.$ext"
         text=$(_completer_program_output "$prog" "$shell" "$tok") || { printf '  no completion for %s (%s)\n' "$prog" "$shell"; continue; }
         _completer_backup "$out"
-        { printf '\n# >>> completer:%s:%s generated %s >>>\n' "$prog" "$shell" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          printf '%s\n' "$text"
-          printf '\n# <<< completer:%s:%s <<<\n' "$prog" "$shell"; } >> "$out"
+        _completer_write_block "$out" "$prog" "$shell" "$text"
         printf '  wrote -> %s\n' "$out"
         _completer_link "$(_completer_main_config "$shell")" "$out" "$shell"
     done

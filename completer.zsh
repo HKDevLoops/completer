@@ -19,9 +19,21 @@ _completer_token() {
 
 _completer_ext() {
     case "$1" in
-        nu) print -r -- nu ;; xonsh) print -r -- xsh ;; pwsh) print -r -- ps1 ;;
+        nu|nushell) print -r -- nu ;; xonsh) print -r -- xsh ;; pwsh|powershell) print -r -- ps1 ;;
         *) print -r -- "$1" ;;
     esac
+}
+
+# Reject names that could traverse the completions dir or inject code when the
+# generated file is sourced. No '/', '\', '..', newline, or shell metachar.
+_completer_valid_name() {
+    local n=$1 bad
+    [[ -n "$n" ]] || return 1
+    case "$n" in *..*) return 1 ;; esac
+    for bad in / '\' ' ' ';' '|' '&' '$' '`' '<' '>' '(' ')' $'\n'; do
+        case "$n" in *"$bad"*) return 1 ;; esac
+    done
+    return 0
 }
 
 _completer_capture() {
@@ -33,12 +45,15 @@ _completer_capture() {
 
 _completer_program_output() {
     local prog=$1 shell=$2 tok=$3 a out
-    for a in "completion --shell $tok" "completion -s $tok" "completion $tok" \
-             "completions $tok" "--generate-completion $tok" "--completions $tok"; do
-        if (( $+commands[$prog] )); then
+    # Resolve the program once; each successful probe returns immediately.
+    local -i have=0
+    (( $+commands[$prog] )) && have=1
+    if (( have )); then
+        for a in "completion --shell $tok" "completion -s $tok" "completion $tok" \
+                 "completions $tok" "--generate-completion $tok" "--completions $tok"; do
             out=$(_completer_capture "$prog" ${=a}) && { printf '%s' "$out"; return 0; }
-        fi
-    done
+        done
+    fi
     if (( $+commands[carapace] )); then
         out=$(_completer_capture carapace "$prog" "$tok") && { printf '%s' "$out"; return 0; }
     fi
@@ -47,8 +62,7 @@ _completer_program_output() {
 
 _completer_backup() {
     [[ -f "$1" ]] || return 0
-    local stamp; stamp=$(date +%Y%m%d-%H%M%S)
-    cp -- "$1" "$1.bak.$stamp" && printf '  backup -> %s.bak.%s\n' "$1" "$stamp"
+    cp -- "$1" "$1.bak" && printf '  backup -> %s.bak\n' "$1"
 }
 
 _completer_main_config() {
@@ -81,6 +95,7 @@ _completer_link() {
 
 add-alias() {
     local name=$1; shift; local value="$*"
+    if ! _completer_valid_name "$name"; then printf 'invalid alias name: %s\n' "$name"; return 1; fi
     local file; file="$(_completer_root)/alias.zsh"
     mkdir -p "${file:h}"
     [[ -f "$file" ]] || print -r -- '# alias.zsh - managed by completer' > "$file"
@@ -92,6 +107,7 @@ add-alias() {
 
 remove-alias() {
     local name=$1
+    if ! _completer_valid_name "$name"; then printf 'invalid alias name: %s\n' "$name"; return 1; fi
     local file; file="$(_completer_root)/alias.zsh"
     [[ -f "$file" ]] || return 0
     grep -vE "^[[:space:]]*alias[[:space:]]+$name=" "$file" > "$file.tmp" && mv "$file.tmp" "$file"
@@ -123,6 +139,7 @@ completer-update-carapace() {
 _completer_zoxide() {
     (( $+commands[zoxide] )) || { printf 'zoxide not found; nothing to do\n'; return 0; }
     local shell=$1 tok out text
+    if ! _completer_valid_name "$shell"; then printf 'invalid shell name: %s\n' "$shell"; return 1; fi
     tok=$(_completer_token "$shell")
     [[ "$shell" == sh ]] && tok=posix
     if [[ "$shell" == bash || "$shell" == zsh ]]; then
@@ -186,8 +203,10 @@ completer() {
     esac
 
     local shell=$action tok ext prog out text
+    if ! _completer_valid_name "$shell"; then printf 'invalid shell name: %s\n' "$shell"; return 1; fi
     tok=$(_completer_token "$shell"); ext=$(_completer_ext "$shell")
     for prog in "${progs[@]}"; do
+        if ! _completer_valid_name "$prog"; then printf '  invalid program name: %s (skipped)\n' "$prog"; continue; fi
         printf 'Generating %s completions for %s...\n' "$prog" "$shell"
         out="$dir/$shell-$prog-completion.$ext"
         text=$(_completer_program_output "$prog" "$shell" "$tok") || { printf '  no completion for %s (%s)\n' "$prog" "$shell"; continue; }

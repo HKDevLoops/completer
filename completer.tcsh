@@ -52,6 +52,21 @@ completer_dispatch:
     set _c_progs = ( $argv )
     if ( $#_c_progs == 0 ) set _c_progs = ( opencode )
 
+    # SECURITY: validate every program name before it reaches a shell parser,
+    # a generated filename, or a sourced completion block. Allowed: one or more
+    # [A-Za-z0-9_.-]; rejected: metacharacters (; | & $ ` < > ( ) etc.), spaces,
+    # path separators (/ and \), '..' traversal and newlines. The trailing '@'
+    # sentinel survives tr so a trailing newline cannot be stripped by `...`.
+    foreach _c_n ( $_c_progs )
+        set _c_clean = "`printf '%s@' "$_c_n" | tr -d 'A-Za-z0-9_.-'`"
+        printf '%s' "$_c_n" | grep -Fq '..'
+        set _c_dotdot = $status
+        if ( "$_c_n" == "" || "$_c_clean" != "@" || $_c_dotdot == 0 ) then
+            echo "rejected unsafe program name: [$_c_n]"
+            goto completer_eof
+        endif
+    end
+
     set _c_root = "$HOME/.config/completer"
     if ( $?COMPLETER_ROOT ) set _c_root = "$COMPLETER_ROOT"
     if ( $?XDG_CONFIG_HOME ) then
@@ -76,6 +91,18 @@ completer_dispatch:
     if ( "$_c_action" == "alias" ) then
         if ( "$1" == "add" ) then
             set _c_name = "$2"; shift 2; set _c_val = "$argv"
+            # SECURITY: the name and value are written to alias.tcsh, which is
+            # sourced next launch -> strict name check + newline/quote guard.
+            set _c_clean = "`printf '%s@' "$_c_name" | tr -d 'A-Za-z0-9_.-'`"
+            printf '%s' "$_c_name" | grep -Fq '..'
+            set _c_dotdot = $status
+            set _c_vlines = "`printf '%s@' "$_c_val" | wc -l | tr -cd '0-9'`"
+            printf '%s' "$_c_val" | grep -Fq "'"
+            set _c_vquote = $status
+            if ( "$_c_name" == "" || "$_c_clean" != "@" || $_c_dotdot == 0 || "$_c_vlines" != "0" || $_c_vquote == 0 ) then
+                echo 'rejected unsafe alias name or value'
+                goto completer_eof
+            endif
             alias "$_c_name" "$_c_val"
             set _c_af = "$_c_root/alias.tcsh"
             set _c_pat = "alias $_c_name"
@@ -88,6 +115,13 @@ completer_dispatch:
             echo "  alias $_c_name -> $_c_val"
         else if ( "$1" == "remove" ) then
             set _c_name = "$2"
+            set _c_clean = "`printf '%s@' "$_c_name" | tr -d 'A-Za-z0-9_.-'`"
+            printf '%s' "$_c_name" | grep -Fq '..'
+            set _c_dotdot = $status
+            if ( "$_c_name" == "" || "$_c_clean" != "@" || $_c_dotdot == 0 ) then
+                echo 'rejected unsafe alias name'
+                goto completer_eof
+            endif
             unalias "$_c_name"
             set _c_af = "$_c_root/alias.tcsh"
             if ( -f "$_c_af" ) then
@@ -140,6 +174,13 @@ completer_dispatch:
         set _c_zs = ( $argv )
         if ( $#_c_zs == 0 ) set _c_zs = ( pwsh nu xonsh )
         foreach _c_z ( $_c_zs )
+            set _c_clean = "`printf '%s@' "$_c_z" | tr -d 'A-Za-z0-9_.-'`"
+            printf '%s' "$_c_z" | grep -Fq '..'
+            set _c_dotdot = $status
+            if ( "$_c_z" == "" || "$_c_clean" != "@" || $_c_dotdot == 0 ) then
+                echo "  rejected unsafe zoxide name: [$_c_z]"
+                continue
+            endif
             set _c_tok = "$_c_z"
             switch ( "$_c_z" )
             case nu:
@@ -172,6 +213,14 @@ completer_dispatch:
 
     # ---- otherwise $action is a TARGET SHELL ------------------------------
     set _c_shell = "$_c_action"
+    # SECURITY: shell name is used in generated paths and sourced markers.
+    set _c_clean = "`printf '%s@' "$_c_shell" | tr -d 'A-Za-z0-9_.-'`"
+    printf '%s' "$_c_shell" | grep -Fq '..'
+    set _c_dotdot = $status
+    if ( "$_c_shell" == "" || "$_c_clean" != "@" || $_c_dotdot == 0 ) then
+        echo "rejected unsafe shell name: [$_c_shell]"
+        goto completer_eof
+    endif
     set _c_tok = "$_c_shell"
     switch ( "$_c_shell" )
     case nu:
@@ -220,8 +269,10 @@ completer_dispatch:
         set _c_out = "$_c_dir/$_c_shell-$_c_prog-completion.$_c_ext"
         set _c_text = ""
         foreach _c_a ( "completion --shell $_c_tok" "completion -s $_c_tok" "completion $_c_tok" "completions $_c_tok" "--generate-completion $_c_tok" "--completions $_c_tok" )
-            set _c_cmd = "$_c_prog $_c_a"
-            set _c_text = "`eval $_c_cmd 2>/dev/null`"
+            # SECURITY: split the fixed probe into a word list and invoke the
+            # validated program directly. No eval of interpolated user text.
+            set _c_words = ( $_c_a )
+            set _c_text = "`$_c_prog $_c_words 2>/dev/null`"
             if ( "$_c_text" != "" ) break
         end
         if ( "$_c_text" == "" ) then
