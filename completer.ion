@@ -43,12 +43,13 @@
 # ============================================================================
 
 fn _completer_root
+    # Declare at function scope: Ion destroys variables first defined inside an
+    # `if` branch at `end`, so a branch-local `result` would be empty on return.
+    let result = ~/.config/completer
     if test -n "${env::COMPLETER_ROOT}"
-        let result = ${env::COMPLETER_ROOT}
+        set result = ${env::COMPLETER_ROOT}
     else if test -n "${env::XDG_CONFIG_HOME}"
-        let result = ${env::XDG_CONFIG_HOME}/completer
-    else
-        let result = ~/.config/completer
+        set result = ${env::XDG_CONFIG_HOME}/completer
     end
     echo $result
 end
@@ -235,7 +236,30 @@ fn _completer_zoxide shell
         echo 'zoxide not found; nothing to do'
         return
     end
-    echo 'zoxide: no native `zoxide init ion` exists and Ion is non-POSIX; skipped.'
+    if test "$shell" = ion
+        echo 'zoxide: no native `zoxide init ion` exists and Ion is non-POSIX; skipped.'
+        return
+    end
+    if test $(_completer_valid_name $shell) -eq 0
+        echo "invalid shell name: $shell"
+        return
+    end
+    let tok = $(_completer_token $shell)
+    if test "$shell" = sh
+        set tok = posix
+    end
+    let text = $(zoxide init $tok ^>/dev/null)
+    if test -z "$text"
+        echo "no zoxide init for $shell"
+        return
+    end
+    let dir = $(_completer_root)/completions
+    mkdir -p $dir
+    let out = $dir/$shell-zoxide-init.$(_completer_ext $shell)
+    _completer_backup $out
+    echo $text > $out
+    echo "  wrote zoxide init -> $out"
+    _completer_link $(_completer_main_config $shell) $out $shell
 end
 
 fn _completer_alias_add name value

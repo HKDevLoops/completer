@@ -64,7 +64,17 @@ _completer_program_output() {
 
 _completer_backup() {
     [ -f "$1" ] || return 0
-    cp -- "$1" "$1.bak" && printf '  backup -> %s.bak\n' "$1"
+    local stamp; stamp=$(date +%Y%m%d-%H%M%S 2>/dev/null) || stamp=backup
+    cp -- "$1" "$1.bak.$stamp" && printf '  backup -> %s.bak.%s\n' "$1" "$stamp"
+}
+
+# Reject alias values that could break out of the single-quoted literal written
+# to alias.<ext> (which is sourced on the next shell launch).
+_completer_valid_value() {
+    local v=$1 nl='
+'
+    case "$v" in *"'"*|*'"'*|*'`'*|*'$'*|*"$nl"*) return 1 ;; esac
+    return 0
 }
 
 _completer_main_config() {
@@ -86,6 +96,7 @@ _completer_link() {
     [ -f "$config" ] || return 0
     marker="# >>> completer:$shell:${file##*/} >>>"
     grep -qF -- "$marker" "$config" && return 0
+    _completer_backup "$config"
     case "$shell" in
         nu|fish) load="source '$file'" ;;
         xonsh) load="execx(open('$file').read(), 'exec', __xonsh__.ctx)" ;;
@@ -99,10 +110,13 @@ _completer_link() {
 add-alias() {
     local name=$1; shift; local value="$*"
     if ! _completer_valid_name "$name"; then printf 'invalid alias name: %s\n' "$name"; return 1; fi
+    if ! _completer_valid_value "$value"; then printf 'invalid alias value (quote/newline not allowed): %s\n' "$value"; return 1; fi
     local file; file="$(_completer_root)/alias.bash"
     mkdir -p "$(dirname "$file")"
     [ -f "$file" ] || printf '# alias.bash - managed by completer\n' > "$file"
-    grep -vE "^[[:space:]]*alias[[:space:]]+$name=" "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+    _completer_backup "$file"
+    grep -vE "^[[:space:]]*alias[[:space:]]+$name=" "$file" > "$file.tmp" || :
+    mv "$file.tmp" "$file"
     printf "alias %s='%s'\n" "$name" "$value" >> "$file"
     alias "$name=$value"
     printf '  alias %s -> %s in %s\n' "$name" "$value" "$file"
@@ -113,7 +127,9 @@ remove-alias() {
     if ! _completer_valid_name "$name"; then printf 'invalid alias name: %s\n' "$name"; return 1; fi
     local file; file="$(_completer_root)/alias.bash"
     [ -f "$file" ] || return 0
-    grep -vE "^[[:space:]]*alias[[:space:]]+$name=" "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+    _completer_backup "$file"
+    grep -vE "^[[:space:]]*alias[[:space:]]+$name=" "$file" > "$file.tmp" || :
+    mv "$file.tmp" "$file"
     unalias "$name" 2>/dev/null || true
     printf '  alias %s removed\n' "$name"
 }
@@ -135,6 +151,7 @@ completer-update-carapace() {
         _completer_backup "$out"
         printf '%s\n' "$res" > "$out"
         printf '  indexed: %s -> %s\n' "$sh" "$out"
+        _completer_link "$(_completer_main_config "$sh")" "$out" "$sh"
     done
     printf 'Carapace index refreshed.\n'
 }
@@ -158,6 +175,25 @@ _completer_zoxide() {
     _completer_link "$(_completer_main_config "$shell")" "$out" "$shell"
 }
 
+# Lazy self-completion for the `completer` command itself. Registered on first
+# invocation, never at load, so sourcing stays zero-cost.
+_completer_self_complete() {
+    local cur=${COMP_WORDS[COMP_CWORD]}
+    case "$cur" in
+        a*) COMPREPLY=( $(compgen -W 'add alias' -- "$cur") ) ;;
+        r*) COMPREPLY=( $(compgen -W 'remove' -- "$cur") ) ;;
+        l*) COMPREPLY=( $(compgen -W 'list' -- "$cur") ) ;;
+        u*) COMPREPLY=( $(compgen -W 'update' -- "$cur") ) ;;
+        z*) COMPREPLY=( $(compgen -W 'zoxide' -- "$cur") ) ;;
+        *)  COMPREPLY=( $(compgen -W 'add remove list update zoxide pwsh powershell bash zsh fish sh nu nushell xonsh elvish cmd tcsh ksh ion oil yash self' -- "$cur") ) ;;
+    esac
+}
+_completer_register_self() {
+    [ -n "${_completer_self_done:-}" ] && return 0
+    complete -F _completer_self_complete completer 2>/dev/null || true
+    _completer_self_done=1
+}
+
 # Idempotent generated block: replace a previously generated block for this
 # program/shell in place, otherwise append. One program per file. Callers back
 # up the target before invoking this.
@@ -165,11 +201,11 @@ _completer_write_block() {
     local out=$1 prog=$2 shell=$3 text=$4
     local begin="# >>> completer:$prog:$shell"
     if [ -f "$out" ] && grep -qF -- "$begin" "$out"; then
-        { printf '\n# >>> completer:%s:%s generated %s >>>\n' "$prog" "$shell" "$(date -Is)"
+        { printf '\n# >>> completer:%s:%s generated %s >>>\n' "$prog" "$shell" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
           printf '%s\n' "$text"
           printf '\n# <<< completer:%s:%s <<<\n' "$prog" "$shell"; } > "$out"
     else
-        { printf '\n# >>> completer:%s:%s generated %s >>>\n' "$prog" "$shell" "$(date -Is)"
+        { printf '\n# >>> completer:%s:%s generated %s >>>\n' "$prog" "$shell" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
           printf '%s\n' "$text"
           printf '\n# <<< completer:%s:%s <<<\n' "$prog" "$shell"; } >> "$out"
     fi
@@ -181,6 +217,7 @@ completer() {
     local root; root="$(_completer_root)"
     local dir="$root/completions"
     mkdir -p "$dir"
+    _completer_register_self
 
     case "$action" in
         list) ls -l "$dir"; return 0 ;;

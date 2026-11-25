@@ -38,6 +38,16 @@ bash -c '
 
   # 3. list must succeed and report the generated file.
   completer list | grep -q "bash-fakeprog-completion" || exit 31
+
+  # 4. alias values containing shell metacharacters must be rejected so the
+  #    generated alias.<ext> cannot execute code when sourced next launch.
+  #    Build the payload with printf so no literal quote breaks this script.
+  evil=$(printf "x\047; echo PWNED; #")
+  completer alias add __evil "$evil" >/dev/null 2>&1 || :
+  if grep -q PWNED "$COMPLETER_ROOT/alias.bash" 2>/dev/null; then exit 41; fi
+
+  # 5. self-completion for `completer` must be registered lazily (not at load).
+  complete -p completer 2>/dev/null | grep -q _completer_self_complete || exit 51
 ' _ "$ROOT"
 rc=$?
 case "$rc" in

@@ -42,7 +42,7 @@ else
     set _croot = "$HOME/.config/completer"
 endif
 
-alias completer "source $_cself \!*"
+alias completer "source \"$_cself\" \!*"
 goto completer_eof
 
 # ---- dispatch mode: invoked as `completer <action> [args...]` --------------
@@ -67,7 +67,7 @@ completer_dispatch:
         endif
     end
 
-    set _c_root = "$HOME/.config/completer"
+    set _c_root = "$_croot"
     if ( $?COMPLETER_ROOT ) set _c_root = "$COMPLETER_ROOT"
     if ( $?XDG_CONFIG_HOME ) then
         set _c_cfg = "$XDG_CONFIG_HOME"
@@ -200,13 +200,58 @@ completer_dispatch:
                 echo "no zoxide init for $_c_z"
                 continue
             endif
-            set _c_out = "$_c_dir/$_c_z-zoxide-init.$_c_z"
+            switch ( "$_c_z" )
+            case nu:
+            case nushell:
+                set _c_zext = nu
+                breaksw
+            case pwsh:
+            case powershell:
+                set _c_zext = ps1
+                breaksw
+            case xonsh:
+                set _c_zext = xsh
+                breaksw
+            default:
+                set _c_zext = "$_c_z"
+                breaksw
+            endsw
+            set _c_out = "$_c_dir/$_c_z-zoxide-init.$_c_zext"
             if ( -f "$_c_out" ) then
                 set _c_stamp = "`date +%Y%m%d-%H%M%S`"
                 cp "$_c_out" "$_c_out.bak.$_c_stamp"
             endif
-            echo "$_c_text" > "$_c_out"
+            printf '%s\n' "$_c_text" > "$_c_out"
             echo "  wrote zoxide init -> $_c_out"
+            # Link the generated init into the target shell's config so zoxide
+            # is actually activated on the next launch, not just written out.
+            set _c_zcfg = "$_c_cfg/completer/$_c_z-completion.$_c_zext"
+            switch ( "$_c_z" )
+            case tcsh:
+            case csh:
+                set _c_zcfg = "$HOME/.tcshrc"
+                breaksw
+            case bash:
+                set _c_zcfg = "$HOME/.bashrc"
+                breaksw
+            case zsh:
+                set _c_zcfg = "$HOME/.zshrc"
+                breaksw
+            case sh:
+                set _c_zcfg = "$HOME/.profile"
+                breaksw
+            endsw
+            if ( -f "$_c_zcfg" ) then
+                set _c_ztail = "$_c_out:t"
+                set _c_zmarker = "# >>> completer:$_c_z:$_c_ztail >>>"
+                grep -qF "$_c_zmarker" "$_c_zcfg"
+                if ( $status != 0 ) then
+                    printf '\n%s\n' "$_c_zmarker" >> "$_c_zcfg"
+                    printf 'source "%s"\n' "$_c_out" >> "$_c_zcfg"
+                    printf '# <<< completer:%s:%s <<<\n' "$_c_z" "$_c_ztail" >> "$_c_zcfg"
+                    echo "  linked -> $_c_zcfg"
+                endif
+            endif
         end
         goto completer_eof
     endif
@@ -288,9 +333,23 @@ completer_dispatch:
             cp "$_c_out" "$_c_out.bak.$_c_stamp"
             echo "  backup -> $_c_out.bak.$_c_stamp"
         endif
-        echo "# >>> completer:$_c_prog:$_c_shell generated `date -u +%Y-%m-%dT%H:%M:%SZ` >>>" >> "$_c_out"
-        echo "$_c_text" >> "$_c_out"
-        echo "# <<< completer:$_c_prog:$_c_shell <<<" >> "$_c_out"
+        # Idempotent generated block: replace in place when this program's begin
+        # marker already exists, otherwise append. csh `echo` interprets backslash
+        # escapes, so printf is used for all generated text.
+        set _c_begin = "# >>> completer:$_c_prog:$_c_shell"
+        if ( -f "$_c_out" ) then
+            grep -qF "$_c_begin" "$_c_out"
+            if ( $status == 0 ) then
+                printf '%s\n' "# >>> completer:$_c_prog:$_c_shell generated `date -u +%Y-%m-%dT%H:%M:%SZ` >>>" > "$_c_out"
+            else
+                printf '%s\n' "" >> "$_c_out"
+                printf '%s\n' "# >>> completer:$_c_prog:$_c_shell generated `date -u +%Y-%m-%dT%H:%M:%SZ` >>>" >> "$_c_out"
+            endif
+        else
+            printf '%s\n' "# >>> completer:$_c_prog:$_c_shell generated `date -u +%Y-%m-%dT%H:%M:%SZ` >>>" >> "$_c_out"
+        endif
+        printf '%s\n' "$_c_text" >> "$_c_out"
+        printf '%s\n' "# <<< completer:$_c_prog:$_c_shell <<<" >> "$_c_out"
         echo "  wrote -> $_c_out"
         # idempotent link into main config
         set _c_tail = "$_c_out:t"

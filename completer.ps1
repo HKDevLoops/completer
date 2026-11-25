@@ -19,8 +19,28 @@
 # PowerShell 5.1 compatible (no ??, no ternary, no 7-only operators).
 # ============================================================================
 
+function Register-CompleterSelf {
+    # Lazy self-completion for the `completer` command itself. Called on first
+    # invocation only, so dot-sourcing this file stays zero-cost.
+    if ($script:CompleterSelfRegistered) { return }
+    $script:CompleterSelfRegistered = $true
+    try {
+        Register-ArgumentCompleter -Native -CommandName 'completer' -ScriptBlock {
+            param($wordToComplete, $commandAst, $cursorPosition)
+            $choices = @('list','alias','add','remove','update','carapace','zoxide',
+                         'pwsh','powershell','bash','zsh','fish','sh','nu','nushell',
+                         'xonsh','elvish','cmd','clink','tcsh','csh','ksh','ion','oil',
+                         'osh','ysh','yash','self')
+            $typed = [string]$wordToComplete
+            @($choices | Where-Object { $_.StartsWith($typed, [StringComparison]::OrdinalIgnoreCase) } |
+              ForEach-Object { [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', 'completer') })
+        }
+    } catch { }
+}
+
 function Get-CompleterSupportedShells {
-    return @('pwsh','powershell','bash','zsh','fish','sh','nu','nushell','xonsh')
+    return @('pwsh','powershell','bash','zsh','fish','sh','nu','nushell','xonsh',
+             'elvish','cmd','clink','tcsh','csh','ksh','ion','oil','osh','ysh','yash')
 }
 
 function Test-CompleterShell {
@@ -300,7 +320,9 @@ function Add-CompleterAlias {
         Set-Content -LiteralPath $script:CompleterAliasFile -Value '# alias.ps1 - managed by completer; dot-source from your profile' -Encoding UTF8
     }
     Backup-CompleterFile -Path $script:CompleterAliasFile
-    $pattern = '(?i)^\s*Set-Alias\s+-Name\s+' + [regex]::Escape($Name) + '(?=\s|$)'
+    # Match both the emitted quoted form ('name') and the legacy unquoted form,
+    # so re-adding an alias replaces its single definition instead of duplicating.
+    $pattern = '(?i)^\s*Set-Alias\s+-Name\s+\x27?' + [regex]::Escape($Name) + '\x27?(?=\s|$)'
     $lines = @(Get-Content -LiteralPath $script:CompleterAliasFile | Where-Object { $_ -notmatch $pattern })
     # alias.ps1 is dot-sourced from the profile, so the name and value must be
     # emitted as single-quoted literals with embedded quotes doubled. Writing
@@ -383,6 +405,7 @@ function completer {
     # for `completer alias add <name> <value>`); restore the documented default.
     if (-not $Program -or $Program.Count -eq 0) { $Program = @('opencode') }
     Initialize-CompleterState
+    Register-CompleterSelf
     if (-not (Test-Path -LiteralPath $script:CompleterCompletions)) {
         New-Item -ItemType Directory -Path $script:CompleterCompletions -Force | Out-Null
     }

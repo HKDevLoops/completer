@@ -67,7 +67,17 @@ _completer_program_output() {
 
 _completer_backup() {
     [ -f "$1" ] || return 0
-    cp -- "$1" "$1.bak" && printf '  backup -> %s.bak\n' "$1"
+    _cb_stamp=$(date +%Y%m%d-%H%M%S 2>/dev/null) || _cb_stamp=backup
+    cp -- "$1" "$1.bak.$_cb_stamp" && printf '  backup -> %s.bak.%s\n' "$1" "$_cb_stamp"
+}
+
+# Reject alias values that could break out of the single-quoted literal written
+# to alias.sh (which is sourced on the next shell launch).
+_completer_valid_value() {
+    _cvv_v=$1; _cvv_nl='
+'
+    case "$_cvv_v" in *"'"*|*'"'*|*'`'*|*'$'*|*"$_cvv_nl"*) return 1 ;; esac
+    return 0
 }
 
 _completer_main_config() {
@@ -88,6 +98,7 @@ _completer_link() {
     [ -f "$_cl_config" ] || return 0
     _cl_marker="# >>> completer:$_cl_shell:${_cl_file##*/} >>>"
     grep -qF -- "$_cl_marker" "$_cl_config" && return 0
+    _completer_backup "$_cl_config"
     case "$_cl_shell" in
         nu|fish) _cl_load="source '$_cl_file'" ;;
         xonsh) _cl_load="execx(open('$_cl_file').read(), 'exec', __xonsh__.ctx)" ;;
@@ -101,10 +112,13 @@ _completer_link() {
 add_alias() {
     name=$1; shift; value="$*"
     if ! _completer_valid_name "$name"; then printf 'invalid alias name: %s\n' "$name"; return 1; fi
+    if ! _completer_valid_value "$value"; then printf 'invalid alias value (quote/newline not allowed): %s\n' "$value"; return 1; fi
     file="$(_completer_root)/alias.sh"
     mkdir -p "$(dirname "$file")"
     [ -f "$file" ] || printf '# alias.sh - managed by completer\n' > "$file"
-    grep -vE "^[[:space:]]*alias[[:space:]]+$name=" "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+    _completer_backup "$file"
+    grep -vE "^[[:space:]]*alias[[:space:]]+$name=" "$file" > "$file.tmp" || :
+    mv "$file.tmp" "$file"
     printf "alias %s='%s'\n" "$name" "$value" >> "$file"
     alias "$name=$value"
     printf '  alias %s -> %s in %s\n' "$name" "$value" "$file"
@@ -136,6 +150,7 @@ completer_update_carapace() {
         _completer_backup "$_cc_out"
         printf '%s\n' "$_cc_res" > "$_cc_out"
         printf '  indexed: %s -> %s\n' "$_cc_sh" "$_cc_out"
+        _completer_link "$(_completer_main_config "$_cc_sh")" "$_cc_out" "$_cc_sh"
     done
     printf 'Carapace index refreshed.\n'
 }

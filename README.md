@@ -24,6 +24,15 @@ for breakfast. It's a **shell function** per shell, written in that shell's own
 native language, that generates completions from any program and wires them into
 your config — only when you ask it to.
 
+> **Who is this for?** `completer` is built for command-line tools that expose a
+> **completion keyword in their subcommands** — e.g. `<program> completion`,
+> `<program> completions`, or a `--generate-completion` / `--completions` flag
+> (think `opencode completion`, `gh completion`, `docker completion`). It calls
+> that keyword, captures the program's own completion script, and wires it into
+> your shell using only native APIs. Programs without such a keyword still work
+> through a `carapace <program> <shell>` fallback, with a small built-in native
+> spec for known exceptions (e.g. `opencode` on Nushell/Xonsh).
+
 ---
 
 ## The vibe
@@ -108,7 +117,7 @@ native spec for shells a tool can't target directly (looking at you, `opencode` 
 ## How it stays out of your way
 
 ```
-your shell config ──(one guarded source line)──▶ .config/completer/setup-<shell>.<ext>
+<config-dir>/<shell config file> ──(one guarded block)──▶ completer/
                                                       │
                                                       ├─ TAB fix (lazy carapace)
                                                       ├─ sources completer.<ext>
@@ -127,7 +136,7 @@ Nothing runs until you call `completer`. Promise. 🤞
 ## Project layout
 
 ```
-completer.<ext>          # 15 native function implementations
+completer.<ext>          # 14 native function files (15 shell targets)
 install.ps1 / install.sh # simple, curl/iwr-friendly linkers
 alias.<ext>              # per-shell alias stores (append/remove methods)
 tests/run-tests.sh       # structural + native-parser test harness

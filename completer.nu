@@ -75,6 +75,7 @@ def completer-link [config: string, file: string, shell: string] {
     let content = (open --raw $config)
     let marker = $"# >>> completer:($shell):($name) >>>"
     if ($content | str contains $marker) { return }
+    completer-backup $config
     let load = match ($shell | str lowercase) {
         'nu' | 'nushell' | 'fish' => $"source '($abs)'"
         'xonsh' => $"execx(open('($abs)').read(), 'exec', __xonsh__.ctx)"
@@ -135,6 +136,8 @@ def completer-nu-script [program: string, captured: any] {
 
 def add-alias [name: string, value: string] {
     if not (completer-valid-name $name) { print $"invalid alias name: ($name)"; return }
+    # Reject quotes/newlines that could break out of the generated alias line.
+    if ($value | str contains "'") or ($value | str contains '"') or ($value | str contains "\n") { print $"invalid alias value: ($value)"; return }
     let file = ((completer-root) | path join "alias.nu")
     let line = $"alias ($name) = ($value)"
     if ($file | path exists) {
@@ -211,7 +214,7 @@ def "nu-complete completer action" [token: record, place: record, buffer: string
 
 # --- public entrypoint -------------------------------------------------------
 
-export def completer [
+def completer [
     action: string@"nu-complete completer action"
     ...programs: string
 ] {

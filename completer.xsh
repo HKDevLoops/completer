@@ -111,14 +111,14 @@ def _link(config, file, shell):
         return
     if existed:
         _backup(config)
-    fwd = file.replace("\\", "/")
+    fwd = file.replace("\\", "/").replace("'", "''")
     if shell.lower() == "xonsh":
         # Native xonsh loading of a generated script in the live session ctx.
         load = "execx(open('%s').read(), 'exec', __xonsh__.ctx)" % fwd
     elif shell.lower() in ("nu", "nushell", "fish"):
         load = "source '%s'" % fwd
     else:
-        load = ". '%s'" % file
+        load = ". '%s'" % fwd
     block = "\n%s\n%s\n# <<< completer:%s:%s <<<\n" % (marker, load, shell, name)
     with p.open("a", encoding="utf-8") as fh:
         fh.write(block)
@@ -221,6 +221,7 @@ def completer_update_carapace():
             _backup(out)
             _P(out).write_text(p.stdout, encoding="utf-8")
             print("  indexed: %s -> %s" % (sh, out))
+            _link(_main_config(sh), out, sh)
     print("Carapace index refreshed.")
 
 
@@ -353,6 +354,14 @@ def _completer_entry(args=None):
     else:
         completer()
     return 0
+
+
+# Register the callable alias at SOURCE time. Xonsh resolves `completer ...` to
+# its built-in `completer` command first, so a lazily-installed alias can NEVER
+# be reached (chicken-and-egg). This single dict write is effectively zero cost:
+# no subprocess, no file I/O, no imports. The heavier add_one_completer imports
+# and self-completion wiring stay lazy in _ensure_completer_registration().
+aliases['completer'] = _completer_entry
 
 
 _completer_registered = False

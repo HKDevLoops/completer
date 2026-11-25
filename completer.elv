@@ -123,6 +123,7 @@ fn _completer-link {|config file shell|
     var base = (basename $file)
     var marker = '# >>> completer:'$shell':'$base' >>>'
     if ?(grep -qF -- $marker $config) { return }
+    _completer-backup $config
     var load = ". '$file'"
     if (or (eq $shell nu) (eq $shell fish)) { set load = "source '$file'" }
     if (eq $shell xonsh) { set load = "execx(open('$file').read(), 'exec', __xonsh__.ctx)" }
@@ -260,15 +261,22 @@ fn completer {|action @args|
         return
     }
     if (eq $action update) {
-        if (eq $args[0] carapace) { _completer-update-carapace } else {
+        if (and (gt (count $args) 0) (eq $args[0] carapace)) {
+            _completer-update-carapace
+        } else {
             echo 'Unknown update target. Try: completer update carapace'
         }
         return
     }
     if (eq $action alias) {
-        if (eq $args[0] add) {
+        if (lt (count $args) 1) {
+            echo 'usage: completer alias add <name> <value> | remove <name>'
+            return
+        } elif (eq $args[0] add) {
+            if (lt (count $args) 2) { echo 'usage: completer alias add <name> <value>'; return }
             _completer-alias-add $args[1] $@args[2..]
         } elif (eq $args[0] remove) {
+            if (lt (count $args) 2) { echo 'usage: completer alias remove <name>'; return }
             _completer-alias-remove $args[1]
         } else {
             echo 'usage: completer alias add <name> <value> | remove <name>'

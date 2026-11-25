@@ -133,13 +133,23 @@ _completer_link() {
     printf '  linked -> %s\n' "$_cl_config"
 }
 
+_completer_valid_value() {
+    _cvv_v=$1; _cvv_nl='
+'
+    case "$_cvv_v" in *"'"*|*'"'*|*'`'*|*'$'*|*"$_cvv_nl"*) return 1 ;; esac
+    return 0
+}
+
 _add_alias() {
     _ca_name=$1; shift; _ca_value="$*"
     _completer_valid_name "$_ca_name" || { printf 'invalid alias name: %s\n' "$_ca_name"; return 1; }
+    _completer_valid_value "$_ca_value" || { printf 'invalid alias value: %s\n' "$_ca_value"; return 1; }
     _ca_file="$(_completer_root)/alias.yash"
     mkdir -p "$(dirname "$_ca_file")"
     [ -f "$_ca_file" ] || printf '# alias.yash - managed by completer\n' > "$_ca_file"
-    grep -vE "^[[:space:]]*alias[[:space:]]+$_ca_name=" "$_ca_file" > "$_ca_file.tmp" && mv "$_ca_file.tmp" "$_ca_file"
+    _completer_backup "$_ca_file"
+    grep -vF "alias $_ca_name=" "$_ca_file" > "$_ca_file.tmp" || :
+    mv "$_ca_file.tmp" "$_ca_file"
     printf "alias %s='%s'\n" "$_ca_name" "$_ca_value" >> "$_ca_file"
     alias "$_ca_name=$_ca_value"
     printf '  alias %s -> %s in %s\n' "$_ca_name" "$_ca_value" "$_ca_file"

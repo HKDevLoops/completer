@@ -145,6 +145,7 @@ function M.link(config, file, shell)
     if not body then return end
     local marker = string.format(M.MARK_B, shell, M.tail(file))
     if body:find(marker, 1, true) then return end
+    M.backup(config)
     local load = ". '" .. file .. "'"
     if shell == "nu" or shell == "fish" then load = "source '" .. file .. "'"
     elseif shell == "xonsh" then load = "execx(open('" .. file .. "').read(), 'exec', __xonsh__.ctx)"
@@ -176,6 +177,11 @@ function M.self()
     clink.argmatcher("completer")
         :addarg("add", "remove", "list", "update", "zoxide", "self")
         :addflags("-h", "--help")
+    -- Discoverability macro (cmd.exe cannot call Lua directly). Registered on
+    -- first call together with self-completion, never at load.
+    pcall(function()
+        os.execute('doskey completer=echo Use the Clink Lua console: completer("list") 2>NUL')
+    end)
     print("Self-completion registered via clink.argmatcher('completer').")
 end
 
@@ -302,21 +308,21 @@ function completer(action, ...)
             print("Generating " .. prog .. " completions for " .. shell .. "...")
             local out = dir .. "/" .. shell .. "-" .. prog .. "-completion." .. ext
             local text = M.program_output(prog, tok)
-            if not text then print("  no completion for " .. prog .. " (" .. shell .. ")") return end
+            -- Skip only this program; do NOT abort the remaining programs.
+            if not text then print("  no completion for " .. prog .. " (" .. shell .. ")") else
             M.backup(out)
             local block = string.format(M.MARK_B, prog, shell) .. " generated " .. os.date("%FT%T") .. "\n" ..
                           text .. "\n" .. string.format(M.MARK_E, prog, shell) .. "\n"
             M.write(out, block)
             print("  wrote -> " .. out)
             M.link(M.main_config(shell), out, shell)
+            end
         end
     end
+    -- First-call self-completion + discoverability macro (cmd.exe cannot call
+    -- Lua directly). Both are installed here, never at load, so sourcing stays
+    -- zero-cost.
     pcall(M.self)
 end
-
--- Discoverability macro only (cmd.exe cannot call Lua functions directly).
-pcall(function()
-    os.execute('doskey completer=echo Use the Clink Lua console: completer("list") 2>NUL')
-end)
 
 return M

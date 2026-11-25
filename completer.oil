@@ -132,13 +132,23 @@ _completer_link() {
     printf '  linked -> %s\n' "$config"
 }
 
+_completer_valid_value() {
+    local v=$1 nl='
+'
+    case "$v" in *"'"*|*'"'*|*'`'*|*'$'*|*"$nl"*) return 1 ;; esac
+    return 0
+}
+
 add-alias() {
     local name=$1; shift; local value="$*"
     _completer_valid_name "$name" || { printf 'invalid alias name: %s\n' "$name"; return 1; }
+    _completer_valid_value "$value" || { printf 'invalid alias value: %s\n' "$value"; return 1; }
     local file; file="$(_completer_root)/alias.oil"
     mkdir -p "$(dirname "$file")"
     [ -f "$file" ] || printf '# alias.oil - managed by completer\n' > "$file"
-    grep -vE "^[[:space:]]*alias[[:space:]]+$name=" "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+    _completer_backup "$file"
+    grep -vF "alias $name=" "$file" > "$file.tmp" || :
+    mv "$file.tmp" "$file"
     printf "alias %s='%s'\n" "$name" "$value" >> "$file"
     alias "$name=$value"
     printf '  alias %s -> %s in %s\n' "$name" "$value" "$file"

@@ -125,7 +125,9 @@ PowerShell (both profiles) — native AST parser:
 - `pwsh -NoProfile -Command '$t=$null;$e=$null;[void][System.Management.Automation.Language.Parser]::ParseFile("<profile>",[ref]$t,[ref]$e); $e.Count'`
   → **0 parse errors** for both copies.
 - SHA256 of both profiles → identical
-  (`894DEE9C072C831BEAD86CB8101318549082AC31C306B661C464A3FD8F478AB6`).
+  (`D321235C01F27981AFF9504E49BAD0B02A028C76E3E937DADA09984664AA8FDD`,
+  re-verified 2026-11-25; both copies byte-identical. The earlier value in this
+  document was stale because the profiles were edited again afterwards.)
 
 Nushell:
 - `nu --no-config-file -c 'source C:\Users\haris\.config\shells\nushell\config.nu'`

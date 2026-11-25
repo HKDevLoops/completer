@@ -42,9 +42,12 @@ end
 
 function _completer_capture
     set -l out ($argv 2>/dev/null); or return 1
-    test -n "$out"; or return 1
-    string match -qr '^(DESCRIPTION|USAGE)' -- "$out"; and return 1
-    printf '%s\n' $out
+    # Join multi-line completion output into ONE scalar: `test -n "$out"` and
+    # `string match` expand a list to multiple args and fail on real scripts.
+    set -l joined (string join \n $out)
+    test -n "$joined"; or return 1
+    string match -qr '^(DESCRIPTION|USAGE)' -- "$joined"; and return 1
+    printf '%s\n' $joined
 end
 
 function _completer_program_output -a prog shell tok
@@ -67,13 +70,21 @@ end
 
 function _completer_backup -a path
     test -f "$path"; or return 0
-    cp -- "$path" "$path.bak"; and printf '  backup -> %s.bak\n' $path
+    set -l stamp (date +%Y%m%d-%H%M%S 2>/dev/null); or set stamp backup
+    cp -- "$path" "$path.bak.$stamp"; and printf '  backup -> %s.bak.%s\n' $path $stamp
+end
+
+# Reject alias values that could break out of a single-quoted literal written
+# to alias.fish (which is sourced on the next shell launch).
+function _completer_valid_value -a value
+    string match -qr "'|\"|`|\$|\n|\r" -- "$value"; and return 1
+    return 0
 end
 
 function _completer_main_config -a shell
     set -l cfg "$HOME/.config"; if set -q XDG_CONFIG_HOME; set cfg "$XDG_CONFIG_HOME"; end
     switch $shell
-        case fish; printf '%s' "$HOME/.config/fish/config.fish"
+        case fish; printf '%s' "$cfg/fish/config.fish"
         case bash; printf '%s' "$HOME/.bashrc"
         case zsh; printf '%s' "$HOME/.zshrc"
         case sh; printf '%s' "$HOME/.profile"
@@ -89,6 +100,7 @@ function _completer_link -a config file shell
     set -l name (path basename $file)
     set -l marker "# >>> completer:$shell:$name >>>"
     grep -qF -- "$marker" "$config"; and return 0
+    _completer_backup "$config"
     set -l load
     switch $shell
         case nu fish; set load "source '$file'"
@@ -104,10 +116,14 @@ function add-alias -a name
         printf 'invalid alias name: %s\n' $name; return 1
     end
     set -l value (string join ' ' $argv[2..-1])
+    if not _completer_valid_value $value
+        printf 'invalid alias value (quote/newline not allowed): %s\n' $value; return 1
+    end
     set -l file (_completer_root)/alias.fish
     mkdir -p (path dirname $file)
     test -f $file; or printf '# alias.fish - managed by completer\n' > $file
-    set -l keep (grep -vE "^[[:space:]]*alias[[:space:]]+$name=" $file)
+    _completer_backup $file
+    set -l keep (grep -vF "alias $name " $file)
     printf '%s\n' $keep > $file
     printf "alias %s '%s'\n" $name $value >> $file
     alias $name=$value
@@ -120,7 +136,8 @@ function remove-alias -a name
     end
     set -l file (_completer_root)/alias.fish
     test -f $file; or return 0
-    set -l keep (grep -vE "^[[:space:]]*alias[[:space:]]+$name=" $file)
+    _completer_backup $file
+    set -l keep (grep -vF "alias $name " $file)
     printf '%s\n' $keep > $file
     functions -q $name; and functions -e $name
     printf '  alias %s removed\n' $name
@@ -142,6 +159,7 @@ function completer-update-carapace
         _completer_backup $out
         printf '%s\n' $res > $out
         printf '  indexed: %s -> %s\n' $sh $out
+        _completer_link (_completer_main_config $sh) $out $sh
     end
     printf 'Carapace index refreshed.\n'
 end
@@ -171,10 +189,24 @@ function _completer_zoxide -a shell
     _completer_link (_completer_main_config $shell) $out $shell
 end
 
+# Lazy self-completion for `completer` itself. Registered on first call only,
+# so sourcing stays zero-cost.
+function _completer_register_self
+    if set -q _completer_self_done; and test "$_completer_self_done" = 1
+        return 0
+    end
+    complete -c completer -f -a 'add remove list update zoxide self'
+    complete -c completer -n '__fish_seen_subcommand_from alias' -a 'add remove'
+    complete -c completer -n '__fish_seen_subcommand_from update' -a 'carapace'
+    set -g _completer_self_done 1
+end
+
 function completer -a action
-    set -l progs $argv[2..-1]; if test -z "$progs"; set progs opencode; end
+    set -l progs $argv[2..-1]
+    if test (count $progs) -eq 0; set progs opencode; end
     set -l dir (_completer_root)/completions
     mkdir -p $dir
+    _completer_register_self
 
     switch $action
         case list; ls -l $dir; return 0
@@ -213,9 +245,9 @@ function completer -a action
         set -l begin "# >>> completer:$prog:$shell"
         if test -f "$out"; and grep -qF -- "$begin" "$out"
             # Replace the previously generated block for this program/shell in place.
-            printf '\n# >>> completer:%s:%s generated %s >>>\n' $prog $shell (date -Is) > $out
+            printf '\n# >>> completer:%s:%s generated %s >>>\n' $prog $shell (date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) > $out
         else
-            printf '\n# >>> completer:%s:%s generated %s >>>\n' $prog $shell (date -Is) >> $out
+            printf '\n# >>> completer:%s:%s generated %s >>>\n' $prog $shell (date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) >> $out
         end
         printf '%s\n' $text >> $out
         printf '\n# <<< completer:%s:%s <<<\n' $prog $shell >> $out
